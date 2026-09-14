@@ -38,6 +38,45 @@ This project is currently in **active development** and is available on Google P
 
 ---
 
+### Build Your Own APK
+The **📦 Build & Release APK** workflow builds signed APKs on GitHub and publishes them as a release you can download — no Android toolchain on your own machine. One-time setup in your fork:
+
+1. Fork this repository, open the **Actions** tab of your fork and enable workflows (GitHub disables them on new forks).
+2. Create a signing key. `keytool` ships with every JDK — on Windows: `winget install EclipseAdoptium.Temurin.21.JDK`, then open a new terminal. Run this **outside** the repository folder and choose a password when asked:
+
+   ```
+   keytool -genkeypair -v -keystore hirameki-release.jks -storetype PKCS12 -alias hirameki -keyalg RSA -keysize 4096 -validity 10000
+   ```
+
+   > [!WARNING]
+   > Back up `hirameki-release.jks` and its password, and never commit them. Android only installs updates signed with the same key: lose it and every device has to uninstall the app — along with any collection data that is not synced — before a newer build will install.
+
+3. Turn the key into text. Windows (PowerShell), which copies it to the clipboard:
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path hirameki-release.jks))) | Set-Clipboard
+   ```
+
+   macOS or Linux: `base64 < hirameki-release.jks`
+
+4. In your fork, open **Settings → Secrets and variables → Actions** and add four repository secrets:
+
+   | Secret | Value |
+   | --- | --- |
+   | `KEYSTORE_BASE64` | the text from step 3 |
+   | `KEYSTORE_PASSWORD` | the keystore password |
+   | `KEY_ALIAS` | `hirameki`, or whatever you passed to `-alias` |
+   | `KEY_PASSWORD` | the key password — with the command above, the same as the keystore password |
+
+5. Open **Actions → 📦 Build & Release APK → Run workflow**. Pushing a tag such as `v1.2.0` starts the same build.
+6. When the run finishes, download the APK from the **Releases** page of your fork. If unsure, take the `universal` APK; `arm64-v8a` is smaller and fits almost every current phone.
+
+The release tag defaults to `v` + `baseVersionName` from `AnkiDroid/build.gradle.kts`. Missing secrets, a wrong keystore password and an already-released tag all stop the run within seconds, before the long build starts — so if that tag already exists, bump `baseVersionName` or type a different tag in the **Run workflow** form. The first build is the slowest; later builds on your default branch reuse the Gradle cache.
+
+These APKs are signed with your key, not Google Play's, so Android will not install them over the Play Store version. Uninstall that first, after syncing or backing up your collection.
+
+---
+
 ### Credits & Acknowledgments
 This work would not be possible without the incredible foundation laid by the [AnkiDroid](https://github.com/ankidroid/Anki-Android) team and its contributors. Please consider donating to support their work.
 
