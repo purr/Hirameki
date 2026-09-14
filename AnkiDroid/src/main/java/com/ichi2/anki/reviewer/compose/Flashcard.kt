@@ -71,7 +71,15 @@ fun Flashcard(
     onLinkClick: (String) -> Unit,
     modifier: Modifier = Modifier,
     isAnswerShown: Boolean,
-    toolbarHeight: Int = 0
+    toolbarHeight: Int = 0,
+    /**
+     * Render the question with the same typography and padding as the answer. The default sizes the
+     * question larger, which reflows the whole card when the answer appears; a card that flips in
+     * place needs both sides to occupy the same space.
+     */
+    useStableLayout: Boolean = false,
+    /** Length of the fade between question and answer. 0 swaps instantly, e.g. hidden by a flip. */
+    sideChangeDurationMs: Int = 300
 ) {
     val currentBaseUrl by rememberUpdatedState(baseUrl)
     val currentOnJavascriptCommandConsumed by rememberUpdatedState(onJavascriptCommandConsumed)
@@ -124,12 +132,16 @@ fun Flashcard(
 
     Crossfade(
         targetState = Pair(isAnswerShown, if (isAnswerShown) answerHtml else questionHtml),
-        animationSpec = tween(300),
+        animationSpec = tween(sideChangeDurationMs),
         label = "FlashcardCrossfade"
     ) { (shown, currentHtml) ->
         val currentStyle =
-            if (shown) bodyLargeStyle else displayLargeStyle.copy(fontWeight = FontWeight.W500)
-        val currentPadding = if (shown) 40 else 36
+            if (shown || useStableLayout) {
+                bodyLargeStyle
+            } else {
+                displayLargeStyle.copy(fontWeight = FontWeight.W500)
+            }
+        val currentPadding = if (shown || useStableLayout) 40 else 36
 
         val composeStyle = remember(
             onSurfaceColorHex,

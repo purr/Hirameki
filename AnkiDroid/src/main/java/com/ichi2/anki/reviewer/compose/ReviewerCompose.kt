@@ -371,21 +371,48 @@ fun ReviewerContent(
                         color = MaterialTheme.colorScheme.surfaceContainer,
                     ) {}
 
-                    Flashcard(
-                        baseUrl = state.baseUrl,
-                        questionHtml = state.questionHtml,
-                        answerHtml = state.answerHtml,
-                        bodyClass = state.bodyClass,
-                        isMediaAutoplayEnabled = state.isMediaAutoplayEnabled,
-                        javascriptCommand = javascriptCommands.firstOrNull(),
-                        onJavascriptCommandConsumed = viewModel::onJavascriptCommandConsumed,
-                        onTap = { },
-                        onLinkClick = {
-                            viewModel.onEvent(ReviewerEvent.LinkClicked(it))
-                        },
-                        isAnswerShown = state.isAnswerShown,
-                        toolbarHeight = (toolbarHeightDp + WhiteboardBottomBarOffset).value.toInt(),
-                    )
+                    // the card view replaces the flashcard and the answer buttons together. it cannot
+                    // serve type-in answers (the text field lives inside the buttons) or whiteboard
+                    // sessions (the canvas needs the touches), so those keep the classic layout.
+                    val useCardView =
+                        Prefs.cardViewReviewer && !state.showTypeInAnswer && !state.isWhiteboardEnabled
+
+                    if (useCardView) {
+                        DraggableFlashcard(
+                            baseUrl = state.baseUrl,
+                            questionHtml = state.questionHtml,
+                            answerHtml = state.answerHtml,
+                            bodyClass = state.bodyClass,
+                            isMediaAutoplayEnabled = state.isMediaAutoplayEnabled,
+                            javascriptCommand = javascriptCommands.firstOrNull(),
+                            onJavascriptCommandConsumed = viewModel::onJavascriptCommandConsumed,
+                            onLinkClick = {
+                                viewModel.onEvent(ReviewerEvent.LinkClicked(it))
+                            },
+                            isAnswerShown = state.isAnswerShown,
+                            tapToFlip = Prefs.cardTapToFlip,
+                            dragToGrade = Prefs.cardDragToGrade,
+                            onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
+                            onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
+                            modifier = Modifier.padding(bottom = paddingValues.calculateBottomPadding()),
+                        )
+                    } else {
+                        Flashcard(
+                            baseUrl = state.baseUrl,
+                            questionHtml = state.questionHtml,
+                            answerHtml = state.answerHtml,
+                            bodyClass = state.bodyClass,
+                            isMediaAutoplayEnabled = state.isMediaAutoplayEnabled,
+                            javascriptCommand = javascriptCommands.firstOrNull(),
+                            onJavascriptCommandConsumed = viewModel::onJavascriptCommandConsumed,
+                            onTap = { },
+                            onLinkClick = {
+                                viewModel.onEvent(ReviewerEvent.LinkClicked(it))
+                            },
+                            isAnswerShown = state.isAnswerShown,
+                            toolbarHeight = (toolbarHeightDp + WhiteboardBottomBarOffset).value.toInt(),
+                        )
+                    }
 
                     // Whiteboard canvas and toolbar
                     if (state.isWhiteboardEnabled && whiteboardViewModel != null) {
@@ -480,29 +507,31 @@ fun ReviewerContent(
                         }
                     }
 
-                    AnswerButtons(
-                        modifier =
-                            Modifier
-                                .align(Alignment.BottomCenter)
-                                .offset(y = -ScreenOffset)
-                                .padding(bottom = paddingValues.calculateBottomPadding())
-                                .onSizeChanged { toolbarHeight = it.height },
-                        isAnswerShown = state.isAnswerShown,
-                        showButtonBadges = state.showAnswerButtonBadges,
-                        colorizeAnswerButtons = state.colorizeAnswerButtons,
-                        showTypeInAnswer = state.showTypeInAnswer,
-                        typedAnswer = state.typedAnswer,
-                        onTypedAnswerChanged = {
-                            viewModel.onEvent(
-                                ReviewerEvent.OnTypedAnswerChanged(it),
-                            )
-                        },
-                        onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
-                        onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
-                        nextTimes = state.nextTimes,
-                        moreOptionsInTopAppBar = Prefs.moreOptionsInTopAppBar,
-                        onMoreOptionsClick = { showBottomSheet = true },
-                    )
+                    if (!useCardView) {
+                        AnswerButtons(
+                            modifier =
+                                Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .offset(y = -ScreenOffset)
+                                    .padding(bottom = paddingValues.calculateBottomPadding())
+                                    .onSizeChanged { toolbarHeight = it.height },
+                            isAnswerShown = state.isAnswerShown,
+                            showButtonBadges = state.showAnswerButtonBadges,
+                            colorizeAnswerButtons = state.colorizeAnswerButtons,
+                            showTypeInAnswer = state.showTypeInAnswer,
+                            typedAnswer = state.typedAnswer,
+                            onTypedAnswerChanged = {
+                                viewModel.onEvent(
+                                    ReviewerEvent.OnTypedAnswerChanged(it),
+                                )
+                            },
+                            onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
+                            onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
+                            nextTimes = state.nextTimes,
+                            moreOptionsInTopAppBar = Prefs.moreOptionsInTopAppBar,
+                            onMoreOptionsClick = { showBottomSheet = true },
+                        )
+                    }
 
                     AnswerIndicator(
                         modifier =

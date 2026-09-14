@@ -1,0 +1,89 @@
+/*
+ * Copyright (c) 2026 Hirameki contributors
+ *
+ * This program is free software; you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License as published by the Free Software
+ * Foundation; either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+package com.ichi2.anki.reviewer.compose
+
+import androidx.compose.runtime.Immutable
+
+/**
+ * Every number behind the reviewer card's gesture, in one place.
+ *
+ * The card is dragged toward a corner to grade it, and how it looks on the way in is a blend of two
+ * behaviours chosen by how fast it was released: a slow, guided release makes it neck ([funnelNarrow]),
+ * a fast throw makes it tumble ([tumbleDegrees]). Everything is a fraction of the card's own size or of
+ * the trip to the corner, so the feel survives any screen size.
+ *
+ * Tune here rather than in [DraggableFlashcard]: nothing in the gesture hard-codes a magic number.
+ */
+@Immutable
+data class CardMotionSpec(
+    /** Size the card has shrunk to by the time it reaches the corner, as a fraction of full size. */
+    val minScale: Float = 0.08f,
+    /**
+     * Shape of the shrink against distance travelled. 1 is linear; above 1 keeps the card large until
+     * it is close to the corner, then shrinks hard.
+     */
+    val shrinkCurve: Float = 1.4f,
+    /** How far along the trip to a corner the rating locks in, so a release past it grades the card. */
+    val registerAt: Float = 0.55f,
+    /** How strongly the corner takes the card off the finger as it approaches. 0 disables the magnet. */
+    val cornerPull: Float = 0.4f,
+    /** How far the flight path bows sideways, as a fraction of its length. 0 is a straight line. */
+    val pathCurve: Float = 0.14f,
+    /** Movement below this fraction of the card's shorter side picks no corner at all. */
+    val deadZone: Float = 0.06f,
+    /** Where a corner sits, as a fraction of the container's shorter side in from that corner. */
+    val cornerInset: Float = 0.12f,
+    /** Sideways lean while dragging, at the point where the card has crossed a full card width. */
+    val tiltDegrees: Float = 9f,
+    // ---- the two release behaviours, blended by speed ----
+    /** Release speed, in card widths per second, at or below which the card only necks. */
+    val funnelSpeed: Float = 0.6f,
+    /** Release speed, in card widths per second, at or above which the card only tumbles. */
+    val throwSpeed: Float = 3.2f,
+    /** How far the card pitches head over heels on a full-speed throw. */
+    val tumbleDegrees: Float = 150f,
+    /** How much the card narrows across its direction of travel when guided in slowly. */
+    val funnelNarrow: Float = 0.45f,
+    /** How much it stretches along that direction at the same time. */
+    val funnelStretch: Float = 0.2f,
+    // ---- timings ----
+    /** Longest the flight into a corner may take; a faster release always lands sooner. */
+    val maxDropMillis: Int = 380,
+    /** Shortest that flight may take, so even a violent throw stays legible. */
+    val minDropMillis: Int = 120,
+    /** How long the card takes to drift home when released without grading. */
+    val homeMillis: Int = 300,
+    /** How long the next card takes to fade in. */
+    val enterMillis: Int = 240,
+    /** How long the card takes to turn over when the answer is revealed. */
+    val flipMillis: Int = 400,
+) {
+    /** Release speed as a 0..1 blend between [funnelSpeed] (guided) and [throwSpeed] (thrown). */
+    fun throwiness(cardWidthsPerSecond: Float): Float {
+        if (throwSpeed <= funnelSpeed) return 0f
+        return ((cardWidthsPerSecond - funnelSpeed) / (throwSpeed - funnelSpeed)).coerceIn(0f, 1f)
+    }
+
+    /** Card size at [journey], which runs 0 at rest to 1 at the corner. */
+    fun scaleAt(journey: Float): Float {
+        val j = journey.coerceIn(0f, 1f)
+        return 1f - (1f - minScale) * Math.pow(j.toDouble(), shrinkCurve.toDouble()).toFloat()
+    }
+
+    companion object {
+        val Default = CardMotionSpec()
+    }
+}

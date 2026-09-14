@@ -112,4 +112,11 @@
     <string name="image_occlusion_notetype_missing">No Image Occlusion note type found</string>
     <string name="single_day">Single Day</string>
     <string name="date_range">Date Range</string>
+    <string name="card_view_category">Card view</string>
+    <string name="card_view_reviewer">Review on a card</string>
+    <string name="card_view_reviewer_summ">Question and answer keep one fixed place on a card you flip, instead of moving when the answer appears. Hides the answer buttons.</string>
+    <string name="card_tap_to_flip">Tap to reveal</string>
+    <string name="card_tap_to_flip_summ">Tap the card to flip it and show the answer</string>
+    <string name="card_drag_to_grade">Drag to a corner to answer</string>
+    <string name="card_drag_to_grade_summ">Again bottom left, Good bottom right, Hard top left, Easy top right. Drag back to the middle to cancel.</string>
 </resources>

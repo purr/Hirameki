@@ -247,6 +247,11 @@ object Prefs {
     val showAnswerButtons by booleanPref(R.string.show_answer_buttons_key, true)
     val applyHiramekiCss by stringPref(R.string.apply_hirameki_css_preference, defaultValue = HIRAMEKI_CSS_ALL)
 
+    /** Show the card on a flippable card surface, with drag-to-a-corner grading instead of answer buttons. */
+    val cardViewReviewer by booleanPref(R.string.card_view_reviewer_key, defaultValue = true)
+    val cardTapToFlip by booleanPref(R.string.card_tap_to_flip_key, defaultValue = true)
+    val cardDragToGrade by booleanPref(R.string.card_drag_to_grade_key, defaultValue = true)
+
     val doubleTapInterval by intPref(R.string.double_tap_timeout_pref_key, defaultValue = 200)
 
     val swipeSensitivity: Float
