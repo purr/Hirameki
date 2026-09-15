@@ -15,10 +15,15 @@
  */
 package com.ichi2.anki.reviewer
 
+import android.os.Bundle
+import android.os.Parcel
+import androidx.activity.ComponentActivity
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.cash.turbine.test
 import com.ichi2.anki.RobolectricTest
+import com.ichi2.anki.libanki.Consts
 import com.ichi2.anki.servicelayer.NoteService
 import io.mockk.coEvery
 import io.mockk.mockkObject
@@ -27,13 +32,18 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import net.ankiweb.rsdroid.BackendException
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.containsString
 import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.android.controller.ActivityController
+import kotlin.test.assertFailsWith
 
 /**
  * Tests for [ReviewerViewModel].
@@ -636,4 +646,225 @@ class ReviewerViewModelTest : RobolectricTest() {
             assertThat("State should remain finished", stateAfter.isFinished, equalTo(true))
             assertThat("Answer should not be shown", stateAfter.isAnswerShown, equalTo(false))
         }
+
+    @Test
+    fun `a revealed answer and typed text come back after process death`() =
+        runTest {
+            addBasicNote("Front 1", "Back 1")
+            addBasicNote("Front 2", "Back 2")
+
+            val first = startHost()
+            val before = reviewerIn(first)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            before.onEvent(ReviewerEvent.OnTypedAnswerChanged("typed"))
+            before.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            val shownCardId = before.currentCard!!.id
+
+            val after = reviewerIn(processDeath(first))
+            val autoplays = recordAutoplays(after)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = after.state.value
+            assertThat("the same card is shown", after.currentCard?.id, equalTo(shownCardId))
+            assertThat("the answer is still revealed", state.isAnswerShown, equalTo(true))
+            assertThat("answer buttons are labelled", state.nextTimes.any { it.isNotEmpty() }, equalTo(true))
+            assertThat("the typed answer is kept", state.typedAnswer, equalTo("typed"))
+            // a question autoplay first would start its audio, then the answer's would cut it off
+            assertThat("only the answer side autoplays", autoplays, equalTo(listOf(true)))
+        }
+
+    @Test
+    fun `the question side is kept when another card leads the queue after process death`() =
+        runTest {
+            addBasicNote("Front 1", "Back 1")
+            addBasicNote("Front 2", "Back 2")
+
+            val first = startHost()
+            val before = reviewerIn(first)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            before.onEvent(ReviewerEvent.OnTypedAnswerChanged("typed"))
+            before.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            val savedCardId = before.currentCard!!.id
+            val second = processDeath(first)
+
+            // the saved card leaves the top of the queue while the app is away
+            col.sched.answerCard(col.sched.currentQueueState()!!, anki.scheduler.CardAnswer.Rating.EASY)
+
+            val after = reviewerIn(second)
+            val autoplays = recordAutoplays(after)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = after.state.value
+            assertThat("another card leads", after.currentCard?.id, not(equalTo(savedCardId)))
+            assertThat("its answer is not revealed", state.isAnswerShown, equalTo(false))
+            assertThat("the other card's typed answer is not applied", state.typedAnswer, equalTo(""))
+            // the load held its question autoplay back for the restore, which plays it instead
+            assertThat("the question side autoplays once", autoplays, equalTo(listOf(false)))
+        }
+
+    @Test
+    fun `leaving again while a restored reviewer is still loading keeps what was on screen`() =
+        runTest {
+            addBasicNote("Front 1", "Back 1")
+            addBasicNote("Front 2", "Back 2")
+
+            val first = startHost()
+            val before = reviewerIn(first)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            before.onEvent(ReviewerEvent.OnTypedAnswerChanged("typed"))
+            before.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            val shownCardId = before.currentCard!!.id
+
+            // android saves the rebuilt reviewer before its first load has run (the new process is still
+            // opening the collection), then kills that process too
+            val second = processDeath(first)
+            reviewerIn(second)
+            val after = reviewerIn(processDeath(second))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = after.state.value
+            assertThat("the same card is shown", after.currentCard?.id, equalTo(shownCardId))
+            assertThat("the answer is still revealed", state.isAnswerShown, equalTo(true))
+            assertThat("the typed answer is kept", state.typedAnswer, equalTo("typed"))
+        }
+
+    @Test
+    fun `a rating refused for a stale queue reloads instead of crashing`() =
+        runTest {
+            val cardId = addBasicNote("Front 1", "Back 1").firstCard().id
+
+            val testDispatcher = StandardTestDispatcher(testScheduler)
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), testDispatcher)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            val stale = viewModel.queueStateFlow.value!!
+
+            // the card changes behind the reviewer's back, like a day cutoff passing while the app is
+            // in the background: the reviewer's queue state no longer matches
+            col.sched.answerCard(col.sched.currentQueueState()!!, anki.scheduler.CardAnswer.Rating.GOOD)
+            val refusal =
+                assertFailsWith<BackendException> {
+                    col.sched.answerCard(stale, anki.scheduler.CardAnswer.Rating.GOOD)
+                }
+            assertThat("the text isStaleQueueAnswer matches", refusal.message, containsString("card was modified"))
+
+            viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = viewModel.state.value
+            assertThat("the refused rating is not recorded", col.getCard(cardId).reps, equalTo(1))
+            assertThat("the queue's current card was reloaded", state.cardDisplayIndex, equalTo(2L))
+            assertThat("the reloaded card shows its question", state.isAnswerShown, equalTo(false))
+        }
+
+    @Test
+    fun `a rating refused because another card leads the queue reloads instead of crashing`() =
+        runTest {
+            addBasicNote("Front 1", "Back 1")
+            addBasicNote("Front 2", "Back 2")
+
+            val testDispatcher = StandardTestDispatcher(testScheduler)
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), testDispatcher)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            val stale = viewModel.queueStateFlow.value!!
+            val shownCardId = stale.topCard.id
+
+            // the shown card itself is unchanged, but another card now leads the backend's queue (in real
+            // use, a learning card that fell due while the app was away). suspending the shown card and
+            // rebuilding the queue gets there without changing its scheduling state
+            col.sched.suspendCards(listOf(shownCardId))
+            col.sched.currentQueueState()
+            val refusal =
+                assertFailsWith<BackendException> {
+                    col.sched.answerCard(stale, anki.scheduler.CardAnswer.Rating.GOOD)
+                }
+            assertThat("the text isStaleQueueAnswer matches", refusal.message, containsString("not at top of queue"))
+            // the refusal also dropped the backend's cached queue, and without one the backend accepts the
+            // answer; rebuild it so the other card leads again when the reviewer rates
+            col.sched.currentQueueState()
+
+            viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = viewModel.state.value
+            assertThat("the refused rating is not recorded", col.getCard(shownCardId).reps, equalTo(0))
+            assertThat("the card now leading is shown", viewModel.currentCard?.id, not(equalTo(shownCardId)))
+            assertThat("it shows its question", state.isAnswerShown, equalTo(false))
+        }
+
+    /**
+     * whether the answer was shown at each autoplay of [viewModel]'s card from now on. deck autoplay is
+     * turned off, so the player reports each autoplay at once instead of starting playback
+     */
+    private fun recordAutoplays(viewModel: ReviewerViewModel): List<Boolean> {
+        updateDeckConfig(Consts.DEFAULT_DECK_ID) { autoplay = false }
+        val answerShownAtAutoplay = mutableListOf<Boolean>()
+        viewModel.cardMediaPlayer.setOnMediaGroupCompletedListener {
+            answerShownAtAutoplay += viewModel.state.value.isAnswerShown
+        }
+        return answerShownAtAutoplay
+    }
+
+    /** an activity hosting the view model, as Reviewer does; [savedState] rebuilds one after process death */
+    private fun startHost(savedState: Bundle? = null): ActivityController<ComponentActivity> {
+        val controller = Robolectric.buildActivity(ComponentActivity::class.java)
+        saveControllerForCleanup(controller)
+        return if (savedState == null) controller.setup() else controller.setup(savedState)
+    }
+
+    /** the view model built the way Reviewer builds it: its factory, given the host's saved state */
+    private fun TestScope.reviewerIn(host: ActivityController<ComponentActivity>): ReviewerViewModel =
+        ViewModelProvider(
+            host.get(),
+            ReviewerViewModel.factory(StandardTestDispatcher(testScheduler)),
+        )[ReviewerViewModel::class.java]
+
+    /**
+     * android killing the backgrounded app: the host saves its state and dies with its view model, then a
+     * new host is created from that state after a trip through a parcel, as in a new process
+     */
+    private fun processDeath(host: ActivityController<ComponentActivity>): ActivityController<ComponentActivity> {
+        val saved = Bundle()
+        host
+            .pause()
+            .stop()
+            .saveInstanceState(saved)
+            .destroy()
+        val parcel = Parcel.obtain()
+        try {
+            parcel.writeBundle(saved)
+            parcel.setDataPosition(0)
+            return startHost(requireNotNull(parcel.readBundle(javaClass.classLoader)))
+        } finally {
+            parcel.recycle()
+        }
+    }
 }

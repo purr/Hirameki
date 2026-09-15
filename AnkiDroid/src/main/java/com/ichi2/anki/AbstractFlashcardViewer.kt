@@ -54,7 +54,6 @@ import android.webkit.WebView
 import android.webkit.WebView.HitTestResult
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.ActivityResultCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -129,6 +128,7 @@ import com.ichi2.anki.reviewer.FullScreenMode.Companion.DEFAULT
 import com.ichi2.anki.reviewer.FullScreenMode.Companion.fromPreference
 import com.ichi2.anki.reviewer.PreviousAnswerIndicator
 import com.ichi2.anki.reviewer.ReviewerConstants
+import com.ichi2.anki.reviewer.isStaleQueueAnswer
 import com.ichi2.anki.servicelayer.NoteService.isMarked
 import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.snackbar.BaseSnackbarBuilderProvider
@@ -281,13 +281,6 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
         },
     )
 
-    private val defaultOnBackCallback = object : OnBackPressedCallback(enabled = true) {
-        override fun handleOnBackPressed() {
-            // TODO: This should be improved now we're using callbacks
-            closeReviewer(RESULT_DEFAULT)
-        }
-    }
-
     protected inner class FlashCardViewerResultCallback(
         private val callback: (result: ActivityResult, reloadRequired: Boolean) -> Unit = { _, _ -> },
     ) : ActivityResultCallback<ActivityResult> {
@@ -412,6 +405,9 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
         restorePreferences()
         tagsDialogFactory = TagsDialogFactory(this).attachToActivity<TagsDialogFactory>(this)
         super.onCreate(savedInstanceState)
+        // a back the system handles finishes without closeReviewer(RESULT_DEFAULT) (see
+        // setupBackPressedCallbacks), so report that result up front; every other exit overwrites it
+        setResult(RESULT_DEFAULT)
         lifecycle.addObserver(automaticAnswer)
 
         // Issue 14142: The reviewer had a focus highlight after answering using a keyboard.
@@ -433,7 +429,12 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
     }
 
     override fun setupBackPressedCallbacks() {
-        onBackPressedDispatcher.addCallback(this, defaultOnBackCallback)
+        // no always-on callback that calls closeReviewer(): any enabled callback stops android 13+
+        // from playing the predictive cross-activity animation (the deck list showing behind). with
+        // none enabled the system finishes the reviewer (api 31/32: the dispatcher falls back to
+        // Activity.onBackPressed). the rest of closeReviewer() is covered elsewhere: onCreate sets the
+        // result, AutomaticAnswer stops on pause and VoicePlaybackViewModel.onCleared deletes the voice recording.
+        // "press back twice" only intercepts the first back; the second one is a system back
         onBackPressedDispatcher.addCallback(this, exitViaDoubleTapBackCallback())
         super.setupBackPressedCallbacks()
     }
@@ -724,11 +725,11 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
             try {
                 answerCardInner(rating)
             } catch (e: BackendException) {
-                val msg = e.message ?: ""
                 // Note: String matching is fragile but necessary because the Backend does not
                 // expose a specific BackendError.Kind or typed subclass for CardModified.
                 // A unit test (testAnswerCardCatchesCardModifiedException) enforces this behavior.
-                if (msg.contains("card was modified", ignoreCase = true)) {
+                // the match is shared with the compose reviewer (ReviewerViewModel.rateCard) so both agree
+                if (e.isStaleQueueAnswer()) {
                     Timber.w(e, "Card was modified by another operation. Reloading queue")
                     updateCardAndRedraw()
                     return@launchCatchingTask
@@ -1861,13 +1862,19 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
         // Destroy the current WebView (to ensure WebView is GCed).
         // Otherwise, we get the following error:
         // "crash wasn't handled by all associated webviews, triggering application crash"
-        cardFrame!!.removeAllViews()
-        cardFrameParent!!.removeView(cardFrame)
+        // #143: Reviewer draws the card in compose and never runs initLayout() (8678f77793 removed its
+        // startLoadingCollection(), so onCollectionLoaded is not called), so it has no card frame: the
+        // webview here is a detached leftover that still shares the renderer. the old !! threw inside
+        // onRenderProcessGone, webview rethrows that as an app crash, and android then closes the
+        // reviewer. so every frame access here tolerates a missing frame
+        val frameParent = cardFrameParent
+        cardFrame?.removeAllViews()
+        frameParent?.removeView(cardFrame)
         // destroy after removal from the view - produces logcat warnings otherwise
         destroyWebView(webView)
         webView = null
-        // inflate a new instance of mCardFrame
-        cardFrame = inflateNewView<FrameLayout>(R.id.flashcard)
+        // inflate a new instance of mCardFrame, only where a laid-out frame exists to hold it
+        if (frameParent != null) cardFrame = inflateNewView<FrameLayout>(R.id.flashcard)
         // Even with the above, I occasionally saw the above error. Manually trigger the GC.
         // I'll keep this line unless I see another crash, which would point to another underlying issue.
         System.gc()
@@ -1875,7 +1882,8 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
 
     fun recreateWebViewFrame() {
         // we need to add at index 0 so gestures still go through.
-        cardFrameParent!!.addView(cardFrame, 0)
+        // no parent without a laid-out frame, see destroyWebViewFrame (#143)
+        cardFrameParent?.addView(cardFrame, 0)
         recreateWebView()
     }
 

@@ -100,6 +100,12 @@ data class CardMotionSpec(
      * lands must not leave the reviewer with no card on screen.
      */
     val awayTimeoutMillis: Int = 2500,
+    /**
+     * Longest a new card stays out of sight waiting for the page of the face that is up to report it drawn, and a
+     * reveal waits for the answer, before going ahead regardless. An in-place swap normally paints within a few
+     * frames; reviewer.js itself gives a card's fonts at most 800 ms before swapping.
+     */
+    val paintWaitMillis: Int = 1000,
     /** How long the next card takes to fade in. */
     val enterMillis: Int = 240,
     /** How long the card takes to turn over when the answer is revealed. */

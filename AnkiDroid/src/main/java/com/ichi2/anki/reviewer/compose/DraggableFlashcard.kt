@@ -86,6 +86,7 @@ import com.ichi2.anki.ui.compose.theme.LocalAnkiColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import kotlin.math.PI
 import kotlin.math.abs
@@ -132,7 +133,13 @@ private enum class CardPhase {
 
     /** Graded and flown into its corner; hidden until the view model delivers the next card. */
     Away,
+
+    /** The next card is being swapped into the faces' pages; hidden and disarmed until the face that is up has painted it. */
+    Arriving,
 }
+
+/** Out of sight and not answerable: graded and gone, or the next card not painted yet. */
+private val CardPhase.isHidden: Boolean get() = this == CardPhase.Away || this == CardPhase.Arriving
 
 /**
  * A corner the card can be dropped into, and the rating that records.
@@ -157,17 +164,22 @@ private enum class GradeCorner(
 private fun GradeCorner.isLeft(isRtl: Boolean) = towardsStart != isRtl
 
 /**
- * Tracks a face's current webview. A new card creates the replacement page before the old one is
- * released, so a release only clears the slot if it still holds that same page.
+ * Tracks a face's current webview. A face keeps one page and swaps cards inside it; it only gets a new one when
+ * the renderer behind the old one died, and the identity check guards that release racing the re-creation.
+ *
+ * A new page has drawn nothing, so [forgetPainted] drops the card the face last reported painted: kept, a face
+ * rebuilt after its renderer died counted as painted and a turn or an entrance brought round its blank page.
  */
 private fun keepPage(
     pages: Array<WebView?>,
     index: Int,
     page: WebView,
     alive: Boolean,
+    forgetPainted: () -> Unit,
 ) {
     if (alive) {
         pages[index] = page
+        forgetPainted()
     } else if (pages[index] === page) {
         pages[index] = null
     }
@@ -232,7 +244,8 @@ private data class Linear(
  *
  * Nothing is recorded until the finger lifts. While dragging the card only shrinks as far as
  * [CardMotionSpec.dragFloorScale]; the rest of the journey happens on release, after which the card
- * stays hidden until the next card actually arrives, so the old one can never be graded twice.
+ * stays hidden until the next card actually arrives and its page has drawn it, so the old one can never
+ * be graded twice and the new one never grows in before its question is on it.
  *
  * Motion lives entirely in [spec]; this function only applies it.
  */
@@ -284,7 +297,9 @@ fun DraggableFlashcard(
     /** Where the card's centre is drawn, from where it rests. Everything corner-related reads this. */
     var cardOffset by remember { mutableStateOf(Offset.Zero) }
     var activeCorner by remember { mutableStateOf<GradeCorner?>(null) }
-    var phase by remember { mutableStateOf(CardPhase.Idle) }
+    // composed with a card already loaded (switching in from the classic view, or a recreated activity), the faces'
+    // new pages have yet to load it: hidden until they have, as for any new card
+    var phase by remember { mutableStateOf(if (baseUrl.isNotEmpty()) CardPhase.Arriving else CardPhase.Idle) }
     var lastCardKey by remember { mutableLongStateOf(cardKey) }
 
     // a flight is either the trip into a corner, which grades, or the drift back to the middle
@@ -311,6 +326,10 @@ fun DraggableFlashcard(
 
     // the two faces' pages, so a vertical swipe can ask the visible one whether it still scrolls
     val pages = remember { arrayOfNulls<WebView>(2) }
+
+    // the card each face's page has actually drawn, as its page reports it
+    var paintedFront by remember { mutableLongStateOf(Long.MIN_VALUE) }
+    var paintedBack by remember { mutableLongStateOf(Long.MIN_VALUE) }
 
     fun visiblePage(): WebView? = pages[if (showsBackFace) 1 else 0]
 
@@ -480,6 +499,15 @@ fun DraggableFlashcard(
         }
     }
 
+    /**
+     * Sends home a card the gesture was holding. A new card resets the card under a finger that is still down, and
+     * that card is not held: a flight started from the stale drag made an arriving card visible before its page had
+     * drawn it, and skipped its entrance.
+     */
+    fun letGo() {
+        if (phase == CardPhase.Drag) driftHome()
+    }
+
     fun dropInto(
         corner: GradeCorner,
         towardsCornerPxPerMs: Float,
@@ -521,8 +549,8 @@ fun DraggableFlashcard(
         touch: Offset,
         cardAtDown: Long,
     ): Boolean {
-        // a graded card is committed, and an absent one cannot be held
-        if (phase == CardPhase.Away || (phase == CardPhase.Flight && isGrading)) return false
+        // a graded card is committed, and an absent or not yet painted one cannot be held
+        if (phase.isHidden || (phase == CardPhase.Flight && isGrading)) return false
         // re-checked here, not only at touch-down: a finger that lands during a throw and starts moving
         // after the next card has loaded would otherwise pick that card up, question side and all
         if (!(liveDragToGrade && liveAnswerShown) || liveCardKey != cardAtDown) return false
@@ -592,11 +620,23 @@ fun DraggableFlashcard(
         val face = if (isAnswerShown) FULL_TURN else 0f
         if (cardKey != lastCardKey) {
             lastCardKey = cardKey
-            // a new card, even one whose html matches the last: centred, the right side up, fading in
+            // a new card, even one whose html matches the last: centred and the right side up, then held out of
+            // sight until its page has painted it; the Arriving effect below plays the entrance
             resetToRest()
+            phase = CardPhase.Arriving
             flip.snapTo(face)
-            playEntrance()
+        } else if (phase.isHidden) {
+            // out of sight there is no turn to watch. animated, a turn still running when the Arriving gate lets the
+            // card in showed the side it turned from, whose page that gate had not waited for
+            flip.snapTo(face)
         } else {
+            // only a turn that moves waits: composed with the answer already up, the card is turned already
+            if (isAnswerShown && flip.value != face) {
+                // the back swaps the new answer in while the question is up; turning before it has painted
+                // would bring the last card's answer round
+                withTimeoutOrNull(spec.paintWaitMillis.toLong()) { snapshotFlow { paintedBack }.first { it == cardKey } }
+                    ?: Timber.w("card view: answer of card %d not painted after %d ms, turning anyway", cardKey, spec.paintWaitMillis)
+            }
             flip.animateTo(face, tween(spec.flipMillis, easing = FastOutSlowInEasing))
             // turning the card back over drops any aim at a corner
             if (!isAnswerShown && phase == CardPhase.Idle) resetToRest()
@@ -613,6 +653,25 @@ fun DraggableFlashcard(
             resetToRest()
             playEntrance()
         }
+    }
+
+    LaunchedEffect(phase, cardKey) {
+        if (phase != CardPhase.Arriving) return@LaunchedEffect
+        // the faces keep their pages and swap the next card in place. grown in before the front has painted
+        // it, the card showed the last card's question (before, a freshly loaded blank face) and then
+        // snapped to the new card: the blink of issue #135. the wait is for the face that will be up: a restore
+        // after process death reveals the answer in the same card action as the load, and the answer bar can reveal
+        // it while the card arrives, and then the entrance shows the back
+        withTimeoutOrNull(spec.paintWaitMillis.toLong()) {
+            snapshotFlow { if (liveAnswerShown) paintedBack else paintedFront }.first { it == cardKey }
+        } ?: Timber.w(
+            "card view: %s of card %d not painted after %d ms, showing it anyway",
+            if (liveAnswerShown) "answer" else "question",
+            cardKey,
+            spec.paintWaitMillis,
+        )
+        phase = CardPhase.Idle
+        playEntrance()
     }
 
     val labelAgain = stringResource(R.string.ease_button_again)
@@ -651,15 +710,16 @@ fun DraggableFlashcard(
                 },
             )
         }
-    // ratings need a revealed answer and a card at rest, the same rule the drag follows
+    // ratings need a revealed answer and a card at rest, the same rule the drag follows; a hidden card offers none
     val accessibilityActions =
         when {
+            phase.isHidden -> emptyList()
             !isAnswerShown -> revealActions
             phase == CardPhase.Idle -> ratingActions
             else -> emptyList()
         }
 
-    val isArmed = dragToGrade && isAnswerShown && phase != CardPhase.Away
+    val isArmed = dragToGrade && isAnswerShown && !phase.isHidden
 
     // on the container, not the card: inside the card's scale and lean layers every movement arrives
     // divided by the card's size. installed once; everything it reads is live state
@@ -667,7 +727,7 @@ fun DraggableFlashcard(
         Modifier.pointerInput(Unit) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
-                if (!(liveDragToGrade && liveAnswerShown) || phase == CardPhase.Away) return@awaitEachGesture
+                if (!(liveDragToGrade && liveAnswerShown) || phase.isHidden) return@awaitEachGesture
                 val cardAtDown = liveCardKey
                 // fed from the touch-down on: started at pickup, a short flick had too few samples for a
                 // speed at all, read as holding still, and the card drifted home instead of flying
@@ -681,7 +741,7 @@ fun DraggableFlashcard(
                             // a second finger makes this a pinch-zoom for the page, never a card drag
                             if (dragging) {
                                 dragging = false
-                                driftHome()
+                                letGo()
                             }
                             while (awaitPointerEvent().changes.any { it.pressed }) {
                                 // wait out the pinch without taking any of it
@@ -697,7 +757,7 @@ fun DraggableFlashcard(
                                     // window taking the touch) arrives already consumed, while a real lift during a
                                     // drag does not: the page stopped receiving the touch at the first consumed
                                     // move. the finger never let go, so this must not grade
-                                    driftHome()
+                                    letGo()
                                 } else {
                                     // the tracker takes no position from a lift, but it zeroes the speed of a card
                                     // held still for a moment before letting go; a lift added as a sample of its
@@ -742,7 +802,7 @@ fun DraggableFlashcard(
                     }
                 } finally {
                     // the handler detached or restarted mid-drag: never leave the card hanging off-centre
-                    if (dragging && phase == CardPhase.Drag) driftHome()
+                    if (dragging) letGo()
                 }
             }
         }
@@ -756,7 +816,7 @@ fun DraggableFlashcard(
             val aim = (currentJourney() / liveSpec.registerAt).coerceIn(0f, 1f)
             val lit =
                 when {
-                    !(liveDragToGrade && liveAnswerShown) || phase == CardPhase.Away -> null
+                    !(liveDragToGrade && liveAnswerShown) || phase.isHidden -> null
                     phase == CardPhase.Flight && isGrading -> flightCorner
                     else -> activeCorner
                 }
@@ -768,7 +828,7 @@ fun DraggableFlashcard(
                 glows[index].floatValue = if (abs(target - next) < GLOW_SETTLED) target else next
                 if (glows[index].floatValue != target) settled = false
             }
-            if (settled && (phase == CardPhase.Idle || phase == CardPhase.Away)) {
+            if (settled && (phase == CardPhase.Idle || phase.isHidden)) {
                 // nothing left to chase: sleep until the card is picked up rather than wake every frame
                 snapshotFlow { phase }.first { it == CardPhase.Drag || it == CardPhase.Flight }
             }
@@ -852,7 +912,7 @@ fun DraggableFlashcard(
                         rotationZ = (offset.x / size.width.coerceAtLeast(1f)) * liveSpec.tiltDegrees
                         alpha =
                             when {
-                                phase == CardPhase.Away -> 0f
+                                phase.isHidden -> 0f
                                 // only a graded flight dissolves, and only once it is deep in the corner
                                 phase == CardPhase.Flight && isGrading ->
                                     1f - ((flight.value - FADE_STARTS_AT) / (1f - FADE_STARTS_AT)).coerceIn(0f, 1f)
@@ -890,7 +950,7 @@ fun DraggableFlashcard(
             ) {
                 val onFaceTap: () -> Unit = {
                     // tapping turns the card over either way, so a reveal can be taken back
-                    if (tapToFlip && phase != CardPhase.Away) {
+                    if (tapToFlip && !phase.isHidden) {
                         if (liveAnswerShown) onUnanswer() else onShowAnswer()
                     }
                 }
@@ -934,7 +994,9 @@ fun DraggableFlashcard(
                         // the face being turned away stops its media as the turn starts, not at edge-on,
                         // so the two sides never play over each other during the flip
                         isShowing = !isAnswerShown,
-                        onWebView = { page, alive -> keepPage(pages, 0, page, alive) },
+                        onWebView = { page, alive -> keepPage(pages, 0, page, alive) { paintedFront = Long.MIN_VALUE } },
+                        paintKey = cardKey,
+                        onPainted = { paintedFront = it },
                     )
                 }
 
@@ -971,7 +1033,9 @@ fun DraggableFlashcard(
                         pageColor = pageColor,
                         replayFinished = replayFinished,
                         isShowing = isAnswerShown,
-                        onWebView = { page, alive -> keepPage(pages, 1, page, alive) },
+                        onWebView = { page, alive -> keepPage(pages, 1, page, alive) { paintedBack = Long.MIN_VALUE } },
+                        paintKey = cardKey,
+                        onPainted = { paintedBack = it },
                     )
                 }
             }

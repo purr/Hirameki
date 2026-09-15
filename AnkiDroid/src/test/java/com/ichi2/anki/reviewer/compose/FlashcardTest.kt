@@ -1,0 +1,251 @@
+/*
+ * Copyright (c) 2026 Hirameki contributors
+ *
+ * This program is free software; you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License as published by the Free Software
+ * Foundation; either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+package com.ichi2.anki.reviewer.compose
+
+import android.annotation.SuppressLint
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebView
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.core.net.toUri
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import com.ichi2.anki.R
+import com.ichi2.anki.RobolectricTest
+import com.ichi2.anki.settings.Prefs
+import com.ichi2.themes.ArabicScriptFont
+import org.hamcrest.MatcherAssert.assertThat
+import org.hamcrest.Matchers.containsString
+import org.hamcrest.Matchers.empty
+import org.hamcrest.Matchers.equalTo
+import org.hamcrest.Matchers.not
+import org.hamcrest.Matchers.sameInstance
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.mockito.MockedStatic
+import org.mockito.Mockito.mockStatic
+import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
+import org.robolectric.Shadows.shadowOf
+
+@RunWith(AndroidJUnit4::class)
+class FlashcardTest : RobolectricTest() {
+    @get:Rule
+    val composeTestRule = createComposeRule()
+
+    /** the card's webviews that are composed now */
+    private val pages = mutableListOf<WebView>()
+
+    private var answerShown by mutableStateOf(false)
+    private var showing by mutableStateOf(true)
+    private var paintKey by mutableLongStateOf(0L)
+
+    @Test
+    fun `a dead renderer is replaced by a fresh webview that shows the same card and side`() {
+        showCard()
+        answerShown = true
+        val first = page()
+
+        assertThat("returning false makes chromium kill the app", rendererGone(first, crashed = false), equalTo(true))
+
+        val second = page()
+        assertThat(second, not(sameInstance(first)))
+        assertThat("the dead webview is destroyed", shadowOf(first).wasDestroyCalled(), equalTo(true))
+        assertThat("the fresh webview loads the shell", shadowOf(second).lastLoadDataWithBaseURL.baseUrl, equalTo(BASE_URL))
+        shellLoaded(second)
+        assertThat(shadowOf(second).lastEvaluatedJavascript, containsString("_showAnswer(\"answer\""))
+    }
+
+    @Test
+    fun `a renderer the system kills again is rebuilt again`() {
+        showCard()
+        rendererGone(page(), crashed = false)
+        rendererGone(page(), crashed = false)
+
+        composeTestRule.runOnIdle { assertThat(pages.size, equalTo(1)) }
+    }
+
+    @Test
+    fun `a show that crashes the fresh renderer too gets no webview until the page shows something else`() {
+        showCard()
+        rendererGone(page(), crashed = true)
+        val rebuilt = page()
+        rendererGone(rebuilt, crashed = true)
+
+        composeTestRule.runOnIdle {
+            assertThat("rebuilding would crash every renderer again", pages, empty())
+            assertThat(shadowOf(rebuilt).wasDestroyCalled(), equalTo(true))
+        }
+
+        answerShown = true
+        assertThat(shadowOf(page()).lastLoadDataWithBaseURL.baseUrl, equalTo(BASE_URL))
+    }
+
+    @Test
+    fun `a show drawn after a renderer crash is rebuilt, not left blank, when a later crash comes`() =
+        withPaintReports { webViewCompat ->
+            showCard()
+            rendererGone(page(), crashed = true)
+            val rebuilt = page()
+            shellLoaded(rebuilt)
+            drawn(rebuilt, webViewCompat)
+
+            rendererGone(rebuilt, crashed = true)
+
+            composeTestRule.runOnIdle { assertThat("a show that drew is no crash loop", pages.size, equalTo(1)) }
+        }
+
+    @Test
+    fun `a question left blank by a crash loop gets a fresh webview when it is shown again`() {
+        showCard()
+        rendererGone(page(), crashed = true)
+        rendererGone(page(), crashed = true)
+        answerShown = true
+        page()
+
+        answerShown = false
+
+        val question = page()
+        shellLoaded(question)
+        assertThat(shadowOf(question).lastEvaluatedJavascript, containsString("_showQuestion(\"question\""))
+    }
+
+    @Test
+    fun `a card face left blank by a crash loop stays blank while turned away and gets a fresh webview once turned back`() {
+        showCard()
+        rendererGone(page(), crashed = true)
+        rendererGone(page(), crashed = true)
+
+        showing = false
+        composeTestRule.runOnIdle { assertThat("rebuilt while hidden, it would crash the face on show", pages, empty()) }
+
+        showing = true
+        assertThat(shadowOf(page()).lastLoadDataWithBaseURL.baseUrl, equalTo(BASE_URL))
+    }
+
+    @Test
+    fun `a card left blank by a crash loop gets a fresh webview when the same card is shown again`() {
+        showCard()
+        rendererGone(page(), crashed = true)
+        rendererGone(page(), crashed = true)
+
+        // the same html under a new paint key: the card came back, after an undo or a relearning step
+        paintKey = 1L
+
+        assertThat(shadowOf(page()).lastLoadDataWithBaseURL.baseUrl, equalTo(BASE_URL))
+    }
+
+    @Test
+    fun `turning the arabic script font off restyles the loaded page without reloading it`() {
+        showCard()
+        val page = page()
+        val shell = shadowOf(page).lastLoadDataWithBaseURL
+        assertThat(shell.data, containsString(ArabicScriptFont.CARD_FONT_FACE))
+        assertThat(shell.data, containsString("font-family: \"Roboto\", \"${ArabicScriptFont.CARD_FONT_FAMILY}\", sans-serif;"))
+        shellLoaded(page)
+
+        composeTestRule.runOnIdle { Prefs.putBoolean(R.string.arabic_script_font_key, false) }
+
+        composeTestRule.runOnIdle {
+            assertThat("no reload", shadowOf(page).lastLoadDataWithBaseURL, sameInstance(shell))
+            val update = shadowOf(page).lastEvaluatedJavascript
+            // the style block travels as a json string, so its quotes arrive escaped
+            assertThat(update, containsString("font-family: \\\"Roboto\\\", sans-serif;"))
+            assertThat(update, not(containsString(ArabicScriptFont.CARD_FONT_FAMILY)))
+        }
+    }
+
+    private fun showCard() {
+        composeTestRule.setContent {
+            Flashcard(
+                baseUrl = BASE_URL,
+                questionHtml = "question",
+                answerHtml = "answer",
+                bodyClass = "card",
+                isMediaAutoplayEnabled = false,
+                javascriptCommand = null,
+                onJavascriptCommandConsumed = {},
+                onTap = {},
+                onLinkClick = {},
+                isAnswerShown = answerShown,
+                isShowing = showing,
+                onWebView = { page, alive -> if (alive) pages += page else pages -= page },
+                paintKey = paintKey,
+            )
+        }
+    }
+
+    private fun page(): WebView = composeTestRule.runOnIdle { pages.single() }
+
+    /** what webview does once the shell document has loaded: the page then gets its show */
+    private fun shellLoaded(page: WebView) = composeTestRule.runOnIdle { shadowOf(page).webViewClient.onPageFinished(page, BASE_URL) }
+
+    private fun rendererGone(
+        page: WebView,
+        crashed: Boolean,
+    ): Boolean {
+        val detail = mock<RenderProcessGoneDetail> { on { didCrash() } doReturn crashed }
+        return composeTestRule.runOnIdle { shadowOf(page).webViewClient.onRenderProcessGone(page, detail) }
+    }
+
+    /** runs [block] with a webview that can message the app, so a page can report what it drew */
+    private fun withPaintReports(block: (MockedStatic<WebViewCompat>) -> Unit) {
+        mockStatic(WebViewFeature::class.java).use { feature ->
+            feature.`when`<Boolean> { WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) }.thenReturn(true)
+            mockStatic(WebViewCompat::class.java).use(block)
+        }
+    }
+
+    /**
+     * what the page and webview do once [page] has drawn its latest show: the page reports the show, then the frame
+     * holding it is committed. robolectric's webview has no visual-state callbacks, so a stand-in view delivers it
+     */
+    // verifies the mocked static call; no real webview is ever asked for the web message listener feature
+    @SuppressLint("RequiresFeature")
+    private fun drawn(
+        page: WebView,
+        webViewCompat: MockedStatic<WebViewCompat>,
+    ) {
+        val listener = argumentCaptor<WebViewCompat.WebMessageListener>()
+        webViewCompat.verify { WebViewCompat.addWebMessageListener(eq(page), any(), any(), listener.capture()) }
+        val report = requireNotNull(PAINT_REPORT.find(shadowOf(page).lastEvaluatedJavascript)) { "the page was sent no show" }
+        val view = mock<WebView> { on { tag } doReturn page.tag }
+        doAnswer { it.getArgument<WebView.VisualStateCallback>(1).onComplete(it.getArgument(0)) }
+            .whenever(view)
+            .postVisualStateCallback(any(), any())
+        composeTestRule.runOnIdle {
+            listener.firstValue.onPostMessage(view, WebMessageCompat(report.groupValues[1]), BASE_URL.toUri(), true, mock())
+        }
+    }
+
+    private companion object {
+        const val BASE_URL = "http://127.0.0.1:1/"
+
+        /** the paint report a show asks the page to send, carrying the show's sequence number */
+        val PAINT_REPORT = Regex("""postMessage\('(\d+)'\)""")
+    }
+}

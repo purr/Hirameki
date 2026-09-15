@@ -19,9 +19,12 @@ import android.app.Application
 import android.content.Intent
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Bundle
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -64,6 +67,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import net.ankiweb.rsdroid.BackendException
 import timber.log.Timber
 import java.io.File
 import java.util.UUID
@@ -235,9 +239,26 @@ sealed class ReviewerEffect {
     ) : ReviewerEffect()
 }
 
+/**
+ * whether the backend refused an answer because the reviewer's queue state is out of date, not because
+ * of a real fault. nothing is written then; showing the queue's current top card is the recovery.
+ * the backend has no typed error for this, so it matches the texts from rslib 25.09:
+ * scheduler/answering/mod.rs ("card was modified") and scheduler/queue/mod.rs ("not at top of queue").
+ * a reworded message silently disables the recovery. ReviewerViewModelTest checks both texts against the
+ * real backend; AbstractFlashcardViewerTest only mocks the exception. shared so the compose and legacy
+ * reviewers agree
+ */
+internal fun BackendException.isStaleQueueAnswer(): Boolean {
+    val text = message ?: return false
+    return text.contains("card was modified", ignoreCase = true) ||
+        text.contains("not at top of queue", ignoreCase = true)
+}
+
 class ReviewerViewModel(
     app: Application,
     private val dispatcher: CoroutineDispatcher = ioDispatcher,
+    // outlives process death, unlike the rest of this class (see onScreenState)
+    private val savedState: SavedStateHandle = SavedStateHandle(),
 ) : AndroidViewModel(app),
     PostRequestHandler {
     private val server = AnkiServer(this)
@@ -375,9 +396,36 @@ class ReviewerViewModel(
         )
     }
 
+    /**
+     * what was on screen when android last saved this reviewer, until the first load has put it back;
+     * null on a fresh start. volatile: the load clears it on [dispatcher], android saves on the main thread
+     */
+    @Volatile
+    private var pendingRestore: Bundle? = savedState.get<Bundle>(STATE_ON_SCREEN)
+
     init {
+        // #143: android kills a backgrounded app and rebuilds the reviewer from saved state, but this
+        // class started from scratch: the rebuilt screen showed the front of the queue's first card and
+        // lost a revealed answer and a typed answer. read only when android saves, on the main thread,
+        // so the state flows stay the one source of truth
+        savedState.setSavedStateProvider(STATE_ON_SCREEN) { onScreenState() }
         server.start()
         onEvent(ReviewerEvent.LoadInitialCard)
+    }
+
+    private fun onScreenState(): Bundle {
+        // until the first load has put a restored screen back, the live state is half loaded: no card yet,
+        // or the question side before the answer is revealed again. saving that would lose the restore
+        // if android killed the process a second time, so the restored bundle is saved as it came
+        pendingRestore?.let { return it }
+        val card = currentCard ?: return Bundle()
+        val shown = _state.value
+        // typed setters: bundleOf is deprecated in this core-ktx for lacking compile-time type safety
+        return Bundle().apply {
+            putLong(KEY_CARD_ID, card.id)
+            putBoolean(KEY_ANSWER_SHOWN, shown.isAnswerShown)
+            putString(KEY_TYPED_ANSWER, shown.typedAnswer)
+        }
     }
 
     override fun onCleared() {
@@ -438,7 +486,15 @@ class ReviewerViewModel(
             is ReviewerEvent.LoadInitialCard ->
                 launchCardAction {
                     withCol { startTimebox() }
-                    loadCardSuspend()
+                    val restore = pendingRestore
+                    // a restore that reveals the answer plays the back, which cuts off a question autoplay
+                    // just started by the load; the restore plays whichever side it leaves shown instead
+                    loadCardSuspend(autoplayQuestion = restore == null)
+                    if (restore != null) {
+                        // inside the load action: launchCardAction ignores a second action while one runs
+                        restoreOnScreenState(restore)
+                        pendingRestore = null
+                    }
                 }
 
             is ReviewerEvent.OnTypedAnswerChanged -> onTypedAnswerChanged(event.newText)
@@ -776,7 +832,8 @@ class ReviewerViewModel(
             }
         }
 
-    internal suspend fun loadCardSuspend() {
+    /** @param autoplayQuestion false when the caller plays the side it ends up showing (see LoadInitialCard) */
+    internal suspend fun loadCardSuspend(autoplayQuestion: Boolean = true) {
         val cardAndQueueState = getNextCard()
         val showAudioPlayButtons = !CollectionPreferences.getHidePlayAudioButtons()
         if (cardAndQueueState == null) {
@@ -836,35 +893,57 @@ class ReviewerViewModel(
                 )
             }
         }
-        cardMediaPlayer.autoplayAllForSide(SingleCardSide.FRONT.toCardSide())
+        if (autoplayQuestion) cardMediaPlayer.autoplayAllForSide(SingleCardSide.FRONT.toCardSide())
     }
 
     private fun showAnswer() {
+        if (currentCard == null || queueState == null) return
+        launchCardAction { showAnswerSuspend() }
+    }
+
+    private suspend fun showAnswerSuspend() {
         val card = currentCard ?: return
         val queue = queueState ?: return
+        val showAudioPlayButtons = !CollectionPreferences.getHidePlayAudioButtons()
+        withCol {
+            val labels = this.sched.describeNextStates(queue.states)
+            typeAnswer.input = _state.value.typedAnswer
+            val renderOutput = card.renderOutput(this)
+            val answerHtml = typeAnswer.filterAnswer(renderOutput.answerText)
+            val processedAnswerHtml =
+                processHtml(answerHtml, renderOutput, this, showAudioPlayButtons)
 
-        launchCardAction {
-            val showAudioPlayButtons = !CollectionPreferences.getHidePlayAudioButtons()
-            withCol {
-                val labels = this.sched.describeNextStates(queue.states)
-                typeAnswer.input = _state.value.typedAnswer
-                val renderOutput = card.renderOutput(this)
-                val answerHtml = typeAnswer.filterAnswer(renderOutput.answerText)
-                val processedAnswerHtml =
-                    processHtml(answerHtml, renderOutput, this, showAudioPlayButtons)
+            val paddedLabels = (labels + List(4) { "" }).take(4)
 
-                val paddedLabels = (labels + List(4) { "" }).take(4)
-
-                _state.update {
-                    it.copy(
-                        answerHtml = processedAnswerHtml,
-                        isAnswerShown = true,
-                        nextTimes = paddedLabels,
-                    )
-                }
+            _state.update {
+                it.copy(
+                    answerHtml = processedAnswerHtml,
+                    isAnswerShown = true,
+                    nextTimes = paddedLabels,
+                )
             }
-            cardMediaPlayer.autoplayAllForSide(SingleCardSide.BACK.toCardSide())
         }
+        cardMediaPlayer.autoplayAllForSide(SingleCardSide.BACK.toCardSide())
+    }
+
+    /**
+     * puts back the typed answer and revealed side saved for a card, if that card still leads the
+     * queue, then autoplays the side left shown (the load held its question autoplay back). the backend
+     * only accepts an answer for its top card ("not at top of queue"), so a restored reviewer always
+     * shows that card; it is the one that was on screen unless another card, such as a learning card
+     * that fell due, took the lead while the app was away
+     */
+    private suspend fun restoreOnScreenState(saved: Bundle) {
+        // an empty queue: no card shown, nothing to play
+        val card = currentCard ?: return
+        if (saved.containsKey(KEY_CARD_ID) && saved.getLong(KEY_CARD_ID) == card.id) {
+            onTypedAnswerChanged(saved.getString(KEY_TYPED_ANSWER).orEmpty())
+            if (saved.getBoolean(KEY_ANSWER_SHOWN)) {
+                showAnswerSuspend()
+                return
+            }
+        }
+        cardMediaPlayer.autoplayAllForSide(SingleCardSide.FRONT.toCardSide())
     }
 
     private fun rateCard(rating: CardAnswer.Rating) {
@@ -879,10 +958,22 @@ class ReviewerViewModel(
 
         launchCardAction {
             var wasLeech = false
-            withCol {
-                this.sched.answerCard(queue, rating).also {
-                    wasLeech = this.sched.stateIsLeech(queue.states.again)
+            try {
+                withCol {
+                    this.sched.answerCard(queue, rating).also {
+                        wasLeech = this.sched.stateIsLeech(queue.states.again)
+                    }
                 }
+            } catch (e: BackendException) {
+                if (!e.isStaleQueueAnswer()) throw e
+                // #143: the queue state was read before the app sat in the background. past the day
+                // cutoff the backend recomputes the card's state and refuses the answer ("card was
+                // modified"); a rebuilt queue can also lead with another card ("not at top of queue").
+                // uncaught, this crashed the app and android closed the reviewer. nothing was
+                // recorded, so show the card that now leads the queue
+                Timber.w(e, "answer refused for a stale queue; reloading")
+                loadCardSuspend()
+                return@launchCardAction
             }
 
             if (rating == CardAnswer.Rating.AGAIN && wasLeech) {
@@ -990,12 +1081,17 @@ class ReviewerViewModel(
     }
 
     companion object {
+        private const val STATE_ON_SCREEN = "reviewer_on_screen"
+        private const val KEY_CARD_ID = "card_id"
+        private const val KEY_ANSWER_SHOWN = "answer_shown"
+        private const val KEY_TYPED_ANSWER = "typed_answer"
+
         fun factory(dispatcher: CoroutineDispatcher = ioDispatcher): ViewModelProvider.Factory =
             viewModelFactory {
                 initializer {
                     val application =
                         checkNotNull(this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY])
-                    ReviewerViewModel(application, dispatcher)
+                    ReviewerViewModel(application, dispatcher, createSavedStateHandle())
                 }
             }
     }
