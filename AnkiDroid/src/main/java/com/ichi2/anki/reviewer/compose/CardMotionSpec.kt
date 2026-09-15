@@ -29,6 +29,15 @@ import androidx.compose.runtime.Immutable
  */
 @Immutable
 data class CardMotionSpec(
+    /** Card shape as width divided by height: a bank card stood on its end (ISO/IEC 7810 ID-1). */
+    val cardAspectRatio: Float = 53.98f / 85.6f,
+    /** How much of the screen the card may cover, leaving the corners clear on every side. */
+    val cardSizeFraction: Float = 0.84f,
+    /**
+     * Smallest the card gets while a finger is still on it. It only shrinks past this once released,
+     * so nothing ever disappears mid-drag.
+     */
+    val dragFloorScale: Float = 0.5f,
     /** Size the card has shrunk to by the time it reaches the corner, as a fraction of full size. */
     val minScale: Float = 0.08f,
     /**
@@ -70,6 +79,13 @@ data class CardMotionSpec(
     val enterMillis: Int = 240,
     /** How long the card takes to turn over when the answer is revealed. */
     val flipMillis: Int = 400,
+    /** How long the corner wells take to appear once the answer is showing, and to fade when it is not. */
+    val wellFadeMillis: Int = 320,
+    /**
+     * How quickly a corner's glow chases the card each frame, 0..1. Low is a slow, soft bloom; 1 makes
+     * the colour snap the instant the card crosses into another corner.
+     */
+    val wellSmoothing: Float = 0.12f,
 ) {
     /** Release speed as a 0..1 blend between [funnelSpeed] (guided) and [throwSpeed] (thrown). */
     fun throwiness(cardWidthsPerSecond: Float): Float {
@@ -77,10 +93,13 @@ data class CardMotionSpec(
         return ((cardWidthsPerSecond - funnelSpeed) / (throwSpeed - funnelSpeed)).coerceIn(0f, 1f)
     }
 
-    /** Card size at [journey], which runs 0 at rest to 1 at the corner. */
-    fun scaleAt(journey: Float): Float {
+    /**
+     * Card size while it is being dragged, at [journey] from 0 at rest to 1 at the corner. It bottoms
+     * out at [dragFloorScale]; the rest of the shrink belongs to the flight in, after release.
+     */
+    fun dragScaleAt(journey: Float): Float {
         val j = journey.coerceIn(0f, 1f)
-        return 1f - (1f - minScale) * Math.pow(j.toDouble(), shrinkCurve.toDouble()).toFloat()
+        return 1f - (1f - dragFloorScale) * Math.pow(j.toDouble(), shrinkCurve.toDouble()).toFloat()
     }
 
     companion object {

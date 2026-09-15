@@ -18,14 +18,17 @@ package com.ichi2.anki.reviewer.compose
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -38,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -54,6 +58,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -67,19 +72,18 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.pow
 
-private val CardInset = 14.dp
-private val WellLabelInset = 14.dp
-private val CardCornerRadius = 26.dp
+private val WellLabelInset = 18.dp
 private val RestElevation = 2.dp
 private val DragElevation = 14.dp
 private const val CAMERA_DISTANCE_DP = 14f
 private const val HALF_TURN = 90f
 private const val FULL_TURN = 180f
+private const val DEGREES_PER_RADIAN = 180f / Math.PI.toFloat()
 private const val MAGNET_CURVE = 1.6f
 private const val WELL_FRACTION = 0.62f
-private const val FADE_STARTS_AT = 0.9f
+private const val FADE_STARTS_AT = 0.86f
 private const val TINT_ALPHA = 0.16f
-private const val ENTER_FROM_SCALE = 0.94f
+private const val LABEL_IDLE_ALPHA = 0.55f
 
 /** What the card is doing right now. */
 private enum class CardPhase { Idle, Drag, Flight }
@@ -88,7 +92,7 @@ private enum class CardPhase { Idle, Drag, Flight }
  * A corner the card can be dropped into, and the rating that records.
  *
  * Left is negative and right is positive; the two most-used ratings sit along the bottom, where a
- * thumb already rests.
+ * thumb already rests. Declaration order matches the interval labels the scheduler hands back.
  */
 private enum class GradeCorner(
     val rating: CardAnswer.Rating,
@@ -106,9 +110,13 @@ private enum class GradeCorner(
 /**
  * The reviewer's card as a card: tap to turn it over, then drag it into a corner to answer.
  *
- * Both sides fill the same fixed rectangle so nothing reflows when the answer appears, and grading is
- * the drag itself, which is why this replaces [AnswerButtons] rather than sitting beside it. Dragging
- * only arms once the answer is shown, matching Anki's rule that you rate after looking.
+ * It is shaped and sized like a bank card rather than filling the screen, so the four corner wells
+ * stay visible and reachable around it. Both sides fill the same rectangle, so nothing reflows when
+ * the answer appears, and grading is the drag itself, which is why this replaces [AnswerButtons]
+ * rather than sitting beside it.
+ *
+ * Nothing is recorded until the finger lifts: while dragging, the card only shrinks as far as
+ * [CardMotionSpec.dragFloorScale], and the rest of the journey into the corner happens on release.
  *
  * Motion lives entirely in [spec]; this function only applies it.
  */
@@ -125,7 +133,9 @@ fun DraggableFlashcard(
     isAnswerShown: Boolean,
     tapToFlip: Boolean,
     dragToGrade: Boolean,
+    nextTimes: List<String>,
     onShowAnswer: () -> Unit,
+    onUnanswer: () -> Unit,
     onRateCard: (CardAnswer.Rating) -> Unit,
     modifier: Modifier = Modifier,
     spec: CardMotionSpec = CardMotionSpec.Default,
@@ -143,11 +153,13 @@ fun DraggableFlashcard(
     var throwiness by remember { mutableFloatStateOf(0f) }
     var lastQuestionHtml by remember { mutableStateOf(questionHtml) }
 
-    // a flight is the arc into a corner, or the drift back to the middle
+    // a flight is either the trip into a corner, which grades, or the drift back to the middle
     val flight = remember { Animatable(0f) }
+    var isGrading by remember { mutableStateOf(false) }
     var flightFrom by remember { mutableStateOf(Offset.Zero) }
     var flightVia by remember { mutableStateOf(Offset.Zero) }
     var flightTo by remember { mutableStateOf(Offset.Zero) }
+    var flightFromScale by remember { mutableFloatStateOf(1f) }
 
     val flip = remember { Animatable(0f) }
     val entrance = remember { Animatable(1f) }
@@ -179,8 +191,7 @@ fun DraggableFlashcard(
         if (containerSize == IntSize.Zero) return null
         val dead = min(containerSize.width, containerSize.height) * spec.deadZone
         if (offset.getDistance() < dead) return null
-        val leftwards = offset.x < 0f
-        val towardsStart = leftwards != isRtl
+        val towardsStart = (offset.x < 0f) != isRtl
         val towardsTop = offset.y < 0f
         return GradeCorner.entries.first { it.towardsStart == towardsStart && it.towardsTop == towardsTop }
     }
@@ -210,6 +221,30 @@ fun DraggableFlashcard(
 
     fun currentJourney(): Float = activeCorner?.let { journeyOf(it, currentOffset()) } ?: 0f
 
+    /**
+     * While a finger is down the card only shrinks to the drag floor, so it can always be seen and
+     * dragged back out. The remaining shrink happens on the flight in, once grading is committed.
+     */
+    fun currentScale(): Float {
+        val dragScale = spec.dragScaleAt(currentJourney())
+        val base =
+            if (phase == CardPhase.Flight && isGrading) {
+                flightFromScale + (spec.minScale - flightFromScale) * flight.value
+            } else {
+                dragScale
+            }
+        return base * entrance.value
+    }
+
+    fun resetToRest() {
+        phase = CardPhase.Idle
+        isGrading = false
+        cardOffset = Offset.Zero
+        rawOffset = Offset.Zero
+        activeCorner = null
+        throwiness = 0f
+    }
+
     fun startFlight(
         to: Offset,
         millis: Int,
@@ -218,6 +253,7 @@ fun DraggableFlashcard(
         val from = currentOffset()
         flightFrom = from
         flightTo = to
+        flightFromScale = spec.dragScaleAt(currentJourney())
         // bow the path sideways, so the card pours in rather than sliding along a ruler
         val mid = Offset((from.x + to.x) / 2f, (from.y + to.y) / 2f)
         val run = Offset(to.x - from.x, to.y - from.y)
@@ -231,13 +267,8 @@ fun DraggableFlashcard(
     }
 
     fun driftHome() {
-        startFlight(Offset.Zero, spec.homeMillis) {
-            phase = CardPhase.Idle
-            cardOffset = Offset.Zero
-            rawOffset = Offset.Zero
-            activeCorner = null
-            throwiness = 0f
-        }
+        isGrading = false
+        startFlight(Offset.Zero, spec.homeMillis) { resetToRest() }
     }
 
     fun dropInto(
@@ -252,26 +283,28 @@ fun DraggableFlashcard(
                 .toInt()
                 .coerceIn(spec.minDropMillis, spec.maxDropMillis)
         view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        isGrading = true
         startFlight(anchor, millis) {
             onRateCard(corner.rating)
-            phase = CardPhase.Idle
-            cardOffset = Offset.Zero
-            rawOffset = Offset.Zero
-            activeCorner = null
-            throwiness = 0f
+            resetToRest()
             entrance.snapTo(0f)
             entrance.animateTo(1f, tween(spec.enterMillis, easing = FastOutSlowInEasing))
         }
     }
 
     LaunchedEffect(questionHtml, isAnswerShown) {
-        val target = if (isAnswerShown) FULL_TURN else 0f
         if (questionHtml != lastQuestionHtml) {
-            // a different card starts face up rather than playing the last flip backwards
             lastQuestionHtml = questionHtml
-            flip.snapTo(target)
+            // a different card starts face up, centred, and never inherits a half-finished drag
+            if (phase != CardPhase.Flight) resetToRest()
+            flip.snapTo(if (isAnswerShown) FULL_TURN else 0f)
         } else {
-            flip.animateTo(target, tween(spec.flipMillis, easing = FastOutSlowInEasing))
+            flip.animateTo(
+                targetValue = if (isAnswerShown) FULL_TURN else 0f,
+                animationSpec = tween(spec.flipMillis, easing = FastOutSlowInEasing),
+            )
+            // turning the card back over drops any aim at a corner
+            if (!isAnswerShown && phase == CardPhase.Idle) resetToRest()
         }
     }
 
@@ -305,13 +338,15 @@ fun DraggableFlashcard(
     val isArmed = dragToGrade && isAnswerShown
     val dragModifier =
         if (isArmed) {
-            Modifier.pointerInput(questionHtml, isAnswerShown, containerSize) {
+            // keyed only on arming: a size change mid-drag must not cancel the gesture
+            Modifier.pointerInput(isArmed) {
                 val tracker = VelocityTracker()
                 detectDragGestures(
                     onDragStart = {
                         tracker.resetTracking()
                         rawOffset = cardOffset
                         phase = CardPhase.Drag
+                        isGrading = false
                         throwiness = 0f
                     },
                     onDragCancel = { driftHome() },
@@ -346,6 +381,32 @@ fun DraggableFlashcard(
             Modifier
         }
 
+    // each well chases the card rather than snapping on, so crossing between corners is a cross-fade
+    val glows = remember { GradeCorner.entries.map { mutableFloatStateOf(0f) } }
+    LaunchedEffect(isArmed) {
+        if (!isArmed) {
+            glows.forEach { it.floatValue = 0f }
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameMillis { }
+            val aim = (currentJourney() / spec.registerAt).coerceIn(0f, 1f)
+            GradeCorner.entries.forEachIndexed { index, corner ->
+                val target = if (corner == activeCorner) aim else 0f
+                val current = glows[index].floatValue
+                val next = current + (target - current) * spec.wellSmoothing
+                // settling exactly stops the redraws once nothing is moving
+                glows[index].floatValue = if (kotlin.math.abs(target - next) < 0.002f) target else next
+            }
+        }
+    }
+
+    val armedAlpha by animateFloatAsState(
+        targetValue = if (isArmed) 1f else 0f,
+        animationSpec = tween(spec.wellFadeMillis, easing = FastOutSlowInEasing),
+        label = "wellArmedAlpha",
+    )
+
     Box(
         modifier =
             modifier
@@ -353,31 +414,33 @@ fun DraggableFlashcard(
                 .onSizeChanged { containerSize = it },
     ) {
         for (corner in GradeCorner.entries) {
-            CornerWell(
+            CornerBloom(
                 corner = corner,
                 color = ratingColors.forRating(corner.rating).color,
-                progress = { if (activeCorner == corner) (currentJourney() / spec.registerAt).coerceIn(0f, 1f) else 0f },
-                visible = isArmed,
+                glow = { glows[corner.ordinal].floatValue },
+                fade = { armedAlpha },
             )
         }
 
         Box(
             modifier =
                 Modifier
-                    .fillMaxSize()
-                    .padding(CardInset)
+                    .align(Alignment.Center)
+                    // a bank card's proportions, kept clear of every edge so the wells stay reachable
+                    .fillMaxSize(spec.cardSizeFraction)
+                    .aspectRatio(spec.cardAspectRatio)
                     // 1: where the card is, how big it is, and how it leans
                     .graphicsLayer {
                         val offset = currentOffset()
                         translationX = offset.x
                         translationY = offset.y
-                        val scale = spec.scaleAt(currentJourney()) * entrance.value
+                        val scale = currentScale()
                         scaleX = scale
                         scaleY = scale
                         rotationZ = (offset.x / size.width.coerceAtLeast(1f)) * spec.tiltDegrees
+                        // only a graded flight dissolves, and only once it is deep in the corner
                         alpha =
-                            if (phase == CardPhase.Flight && activeCorner != null) {
-                                // only dissolve once it is all the way in, at its smallest
+                            if (phase == CardPhase.Flight && isGrading) {
                                 1f - ((flight.value - FADE_STARTS_AT) / (1f - FADE_STARTS_AT)).coerceIn(0f, 1f)
                             } else {
                                 1f
@@ -387,7 +450,7 @@ fun DraggableFlashcard(
                     // 2: line the frame up with the direction of travel
                     .graphicsLayer {
                         val offset = currentOffset()
-                        rotationZ = atan2(offset.y, offset.x) * (180f / Math.PI.toFloat())
+                        rotationZ = atan2(offset.y, offset.x) * DEGREES_PER_RADIAN
                     }
                     // 3: the two release behaviours, blended by how hard the card was thrown
                     .graphicsLayer {
@@ -401,7 +464,7 @@ fun DraggableFlashcard(
                     // 4: back into the card's own frame
                     .graphicsLayer {
                         val offset = currentOffset()
-                        rotationZ = -atan2(offset.y, offset.x) * (180f / Math.PI.toFloat())
+                        rotationZ = -atan2(offset.y, offset.x) * DEGREES_PER_RADIAN
                     }.then(dragModifier)
                     .semantics { customActions = ratingActions },
         ) {
@@ -430,7 +493,12 @@ fun DraggableFlashcard(
                             isMediaAutoplayEnabled = isMediaAutoplayEnabled,
                             javascriptCommand = javascriptCommand,
                             onJavascriptCommandConsumed = onJavascriptCommandConsumed,
-                            onTap = { if (tapToFlip && !isAnswerShown) onShowAnswer() },
+                            // tapping turns the card over either way, so a reveal can be taken back
+                            onTap = {
+                                if (tapToFlip) {
+                                    if (isAnswerShown) onUnanswer() else onShowAnswer()
+                                }
+                            },
                             onLinkClick = onLinkClick,
                             // the sides swap while the card is edge-on, where a fade would never be seen
                             isAnswerShown = flip.value > HALF_TURN,
@@ -452,33 +520,44 @@ fun DraggableFlashcard(
                 }
             }
         }
+
+        // drawn after the card so a rating and its interval stay readable even as the card passes over
+        for (corner in GradeCorner.entries) {
+            CornerLabel(
+                corner = corner,
+                color = ratingColors.forRating(corner.rating).color,
+                nextTime = nextTimes.getOrElse(corner.ordinal) { "" },
+                glow = { glows[corner.ordinal].floatValue },
+                fade = { armedAlpha },
+            )
+        }
     }
 }
 
 /**
- * The well that swallows the card: a bloom of the rating colour with rings that contract toward the
- * corner as the card approaches, and the rating's name above it.
+ * The well that swallows the card: a soft bloom of the rating colour with rings that contract toward
+ * the corner as the card approaches.
  *
- * [progress] is read lazily so the drag repaints the well without recomposing it.
+ * [glow] and [fade] are read lazily inside draw and layer scopes, so the drag repaints the well
+ * without recomposing it.
  */
 @Composable
-private fun BoxScope.CornerWell(
+private fun BoxScope.CornerBloom(
     corner: GradeCorner,
     color: Color,
-    progress: () -> Float,
-    visible: Boolean,
+    glow: () -> Float,
+    fade: () -> Float,
 ) {
-    if (!visible) return
-
     Box(
         modifier =
             Modifier
                 .align(corner.alignment)
-                .fillMaxWidth(WELL_FRACTION)
                 .fillMaxSize(WELL_FRACTION),
     ) {
         Canvas(modifier = Modifier.matchParentSize()) {
-            val p = progress()
+            val visibility = fade()
+            if (visibility <= 0f) return@Canvas
+            val p = glow() * visibility
             val focus =
                 Offset(
                     x = if (corner.towardsStart) 0f else size.width,
@@ -487,35 +566,76 @@ private fun BoxScope.CornerWell(
             drawRect(
                 brush =
                     Brush.radialGradient(
-                        colors = listOf(color.copy(alpha = 0.1f + 0.62f * p), Color.Transparent),
+                        colors = listOf(color.copy(alpha = (0.05f + 0.34f * p) * visibility), Color.Transparent),
                         center = focus,
                         radius = size.minDimension,
                     ),
             )
             if (p > 0f) {
                 drawCircle(
-                    color = color.copy(alpha = 0.42f * p),
+                    color = color.copy(alpha = 0.3f * p),
                     radius = size.minDimension * (1.05f - 0.55f * p),
                     center = focus,
                     style = Stroke(width = 3f),
                 )
                 drawCircle(
-                    color = color.copy(alpha = 0.28f * p),
+                    color = color.copy(alpha = 0.2f * p),
                     radius = size.minDimension * (0.7f - 0.4f * p),
                     center = focus,
                     style = Stroke(width = 2f),
                 )
             }
         }
-
-        Text(
-            text = stringResource(corner.labelRes),
-            style = MaterialTheme.typography.labelLarge,
-            color = color,
-            modifier =
-                Modifier
-                    .align(corner.alignment)
-                    .padding(WellLabelInset),
-        )
     }
 }
+
+/**
+ * A corner's rating and the interval it would schedule, sitting above the card so it stays readable
+ * while the card travels over it. Brightens and grows as the card comes for it.
+ */
+@Composable
+private fun BoxScope.CornerLabel(
+    corner: GradeCorner,
+    color: Color,
+    nextTime: String,
+    glow: () -> Float,
+    fade: () -> Float,
+) {
+    Column(
+        modifier =
+            Modifier
+                .align(corner.alignment)
+                .padding(WellLabelInset)
+                .graphicsLayer {
+                    val p = glow()
+                    alpha = (LABEL_IDLE_ALPHA + (1f - LABEL_IDLE_ALPHA) * p) * fade()
+                    val grow = 1f + 0.16f * p
+                    scaleX = grow
+                    scaleY = grow
+                    transformOrigin = corner.labelOrigin()
+                },
+        horizontalAlignment = if (corner.towardsStart) Alignment.Start else Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        Text(
+            text = stringResource(corner.labelRes),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = color,
+        )
+        if (nextTime.isNotEmpty()) {
+            Text(
+                text = nextTime,
+                style = MaterialTheme.typography.labelMedium,
+                color = color.copy(alpha = 0.8f),
+            )
+        }
+    }
+}
+
+/** Grow the label out of its own corner rather than its middle. */
+private fun GradeCorner.labelOrigin(): androidx.compose.ui.graphics.TransformOrigin =
+    androidx.compose.ui.graphics.TransformOrigin(
+        pivotFractionX = if (towardsStart) 0f else 1f,
+        pivotFractionY = if (towardsTop) 0f else 1f,
+    )

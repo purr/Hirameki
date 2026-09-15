@@ -392,7 +392,9 @@ fun ReviewerContent(
                             isAnswerShown = state.isAnswerShown,
                             tapToFlip = Prefs.cardTapToFlip,
                             dragToGrade = Prefs.cardDragToGrade,
+                            nextTimes = state.nextTimes,
                             onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
+                            onUnanswer = { viewModel.onEvent(ReviewerEvent.UnanswerCard) },
                             onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
                             modifier = Modifier.padding(bottom = paddingValues.calculateBottomPadding()),
                         )

@@ -57,6 +57,37 @@ import com.ichi2.utils.toRGBHex
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 
+/** Marker the tap probe returns when the tap landed on something the card itself handles. */
+private const val INTERACTIVE_TOKEN = "interactive"
+
+/** Selectors for card content that owns its own taps: audio replay, links, form controls. */
+private const val INTERACTIVE_SELECTORS = "a,button,input,select,textarea,video,audio,[onclick],.replay-button"
+
+/**
+ * Asks the page what sits under a tap, in device pixels, so a tap on a replay button plays audio
+ * instead of turning the card over. Conversion happens in the page because only it knows its own
+ * pixel ratio and pinch-zoom scale.
+ */
+private fun interactiveAtPointScript(
+    rawX: Float,
+    rawY: Float,
+): String =
+    """
+    (function() {
+        try {
+            var viewport = window.visualViewport;
+            var ratio = window.devicePixelRatio || 1;
+            var scale = (viewport && viewport.scale) ? viewport.scale : 1;
+            var x = $rawX / (ratio * scale) + (viewport ? viewport.offsetLeft : 0);
+            var y = $rawY / (ratio * scale) + (viewport ? viewport.offsetTop : 0);
+            var element = document.elementFromPoint(x, y);
+            return (element && element.closest('$INTERACTIVE_SELECTORS')) ? '$INTERACTIVE_TOKEN' : 'plain';
+        } catch (e) {
+            return 'plain';
+        }
+    })()
+    """.trimIndent()
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun Flashcard(
@@ -122,6 +153,9 @@ fun Flashcard(
     val primaryColorHex = primaryColor.toArgb().toRGBHex()
     val outlineColor = MaterialTheme.colorScheme.outline
     val outlineColorHex = outlineColor.toArgb().toRGBHex()
+    // selection and links otherwise render in the webview's stock blue, ignoring the wallpaper theme
+    val primaryContainerColorHex = MaterialTheme.colorScheme.primaryContainer.toArgb().toRGBHex()
+    val onPrimaryContainerColorHex = MaterialTheme.colorScheme.onPrimaryContainer.toArgb().toRGBHex()
     val typography = MaterialTheme.typography
     val displayLargeStyle = typography.displayMedium
     val bodyLargeStyle = typography.titleLarge
@@ -148,6 +182,8 @@ fun Flashcard(
             surfaceColorHex,
             surfaceContainerColorHex,
             primaryColorHex,
+            primaryContainerColorHex,
+            onPrimaryContainerColorHex,
             outlineColorHex,
             currentStyle,
             currentPadding,
@@ -190,6 +226,27 @@ fun Flashcard(
                     body.card .back {
                         font-weight: 400;
                         line-height: 1.4;
+                    }
+                    ::selection {
+                        background-color: $primaryContainerColorHex;
+                        color: $onPrimaryContainerColorHex;
+                    }
+                    ::-moz-selection {
+                        background-color: $primaryContainerColorHex;
+                        color: $onPrimaryContainerColorHex;
+                    }
+                    a, a:visited {
+                        color: $primaryColorHex;
+                        -webkit-tap-highlight-color: ${primaryContainerColorHex}59;
+                    }
+                    b, strong, .highlight, mark {
+                        color: inherit;
+                    }
+                    mark {
+                        background-color: ${primaryContainerColorHex}80;
+                        color: $onPrimaryContainerColorHex;
+                        border-radius: 4px;
+                        padding: 0 2px;
                     }
                     body.card.nightMode, body.card.night_mode {
                         background-color: $surfaceColorHex;
@@ -374,7 +431,14 @@ fun Flashcard(
                 val gestureDetector = GestureDetector(
                     context, object : GestureDetector.SimpleOnGestureListener() {
                         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                            currentOnTap()
+                            // a tap on a replay button, link or form control belongs to the card's own
+                            // html; only taps on blank card area should turn the card over
+                            val webView = this@apply
+                            webView.evaluateJavascript(interactiveAtPointScript(e.x, e.y)) { result ->
+                                if (result?.contains(INTERACTIVE_TOKEN) != true) {
+                                    currentOnTap()
+                                }
+                            }
                             return true
                         }
                     })
