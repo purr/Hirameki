@@ -38,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +68,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import anki.scheduler.CardAnswer
 import com.ichi2.anki.R
 import com.ichi2.anki.reviewer.ReviewerJavascriptCommand
@@ -174,6 +176,8 @@ fun DraggableFlashcard(
 
     val flip = remember { Animatable(0f) }
     val entrance = remember { Animatable(1f) }
+    // changes only as the card passes edge-on, so the faces recompose twice per flip, not every frame
+    val showsBackFace by remember { derivedStateOf { flip.value > HALF_TURN } }
 
     /** Mirror the geometry in RTL so "start" corners stay under the labels that name them. */
     fun anchorFor(corner: GradeCorner): Offset {
@@ -525,6 +529,10 @@ fun DraggableFlashcard(
                         if (isAnswerShown) onUnanswer() else onShowAnswer()
                     }
                 }
+                // both faces are full-size webviews stacked in one box, and alpha 0 hides a view without
+                // stopping it from receiving touches. whichever face is showing must be on top, or the
+                // invisible one swallows every tap, including the replay buttons on the visible side.
+                val showsBack = showsBackFace
                 val tint = activeCorner?.let { ratingColors.forRating(it.rating).color } ?: Color.Transparent
                 val tintAlpha = { (currentJourney() / spec.registerAt).coerceIn(0f, 1f) * TINT_ALPHA }
                 val colors = MaterialTheme.colorScheme
@@ -535,7 +543,10 @@ fun DraggableFlashcard(
                 // two real faces, both painted as soon as the card loads: the flip only reveals a side
                 // that is already rendered, instead of swapping the html while the card turns
                 CardFace(
-                    modifier = Modifier.graphicsLayer { alpha = if (flip.value <= HALF_TURN) 1f else 0f },
+                    modifier =
+                        Modifier
+                            .zIndex(if (showsBack) 0f else 1f)
+                            .graphicsLayer { alpha = if (flip.value <= HALF_TURN) 1f else 0f },
                     color = colors.surfaceContainerHigh,
                     border = BorderStroke(FrontBorder, colors.outlineVariant),
                     elevation = elevation,
@@ -550,7 +561,7 @@ fun DraggableFlashcard(
                         isMediaAutoplayEnabled = isMediaAutoplayEnabled && !isAnswerShown,
                         javascriptCommand = if (isAnswerShown) null else javascriptCommand,
                         onJavascriptCommandConsumed = onJavascriptCommandConsumed,
-                        onTap = onFaceTap,
+                        onTap = { if (!showsBackFace) onFaceTap() },
                         onLinkClick = onLinkClick,
                         isAnswerShown = false,
                         toolbarHeight = 0,
@@ -563,10 +574,12 @@ fun DraggableFlashcard(
                 CardFace(
                     // pre-turned half a revolution, so it reads the right way round once flipped to
                     modifier =
-                        Modifier.graphicsLayer {
-                            rotationY = FULL_TURN
-                            alpha = if (flip.value > HALF_TURN) 1f else 0f
-                        },
+                        Modifier
+                            .zIndex(if (showsBack) 1f else 0f)
+                            .graphicsLayer {
+                                rotationY = FULL_TURN
+                                alpha = if (flip.value > HALF_TURN) 1f else 0f
+                            },
                     color = backColor,
                     border = BorderStroke(BackBorder, colors.primary.copy(alpha = BACK_BORDER_ALPHA)),
                     elevation = elevation,
@@ -583,7 +596,7 @@ fun DraggableFlashcard(
                         isMediaAutoplayEnabled = isMediaAutoplayEnabled && isAnswerShown,
                         javascriptCommand = if (isAnswerShown) javascriptCommand else null,
                         onJavascriptCommandConsumed = onJavascriptCommandConsumed,
-                        onTap = onFaceTap,
+                        onTap = { if (showsBackFace) onFaceTap() },
                         onLinkClick = onLinkClick,
                         isAnswerShown = true,
                         toolbarHeight = 0,
