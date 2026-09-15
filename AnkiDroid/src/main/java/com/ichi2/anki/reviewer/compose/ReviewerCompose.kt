@@ -82,6 +82,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -550,14 +551,24 @@ fun ReviewerContent(
                         }
                     }
 
-                    if (!cardCoversThisStep) {
+                    if (keepsAnswerBarRoom) {
                         AnswerButtons(
                             modifier =
                                 Modifier
                                     .align(Alignment.BottomCenter)
                                     .offset(y = -ScreenOffset)
                                     .padding(bottom = paddingValues.calculateBottomPadding())
-                                    .onSizeChanged { toolbarHeight = it.height },
+                                    .onSizeChanged { toolbarHeight = it.height }
+                                    // on a step the card performs itself the buttons are measured but never
+                                    // placed: unseen and untouchable, yet their room is known before the first
+                                    // reveal. measured only once shown, the room arrived with the first flip
+                                    // and moved the card as it turned
+                                    .layout { measurable, constraints ->
+                                        val buttons = measurable.measure(constraints)
+                                        layout(buttons.width, buttons.height) {
+                                            if (!cardCoversThisStep) buttons.place(0, 0)
+                                        }
+                                    },
                             isAnswerShown = state.isAnswerShown,
                             showButtonBadges = state.showAnswerButtonBadges,
                             colorizeAnswerButtons = state.colorizeAnswerButtons,
@@ -583,6 +594,9 @@ fun ReviewerContent(
                                 .align(Alignment.TopEnd)
                                 .padding(end = 16.dp, top = 16.dp),
                         feedback = state.answerFeedback,
+                        // a card dragged into a corner is confirmed by that corner; a second notice of the
+                        // same rating up here is noise
+                        isShown = !(useCardView && Prefs.cardDragToGrade),
                         onDismissed = { viewModel.onEvent(ReviewerEvent.AnswerFeedbackShown) },
                     )
                 }
@@ -777,6 +791,7 @@ fun ReviewerContent(
 fun AnswerIndicator(
     modifier: Modifier = Modifier,
     feedback: AnswerFeedback?,
+    isShown: Boolean = true,
     onDismissed: () -> Unit,
 ) {
     var lastFeedback by remember { mutableStateOf<AnswerFeedback?>(null) }
@@ -784,6 +799,11 @@ fun AnswerIndicator(
 
     LaunchedEffect(feedback) {
         if (feedback != null) {
+            // still acknowledged when not shown, so a notice cannot linger and surface later
+            if (!isShown) {
+                currentOnDismissed()
+                return@LaunchedEffect
+            }
             lastFeedback = feedback
             delay(AnswerIndicatorDuration.milliseconds)
             currentOnDismissed()
@@ -791,7 +811,7 @@ fun AnswerIndicator(
     }
 
     AnimatedVisibility(
-        visible = feedback != null,
+        visible = feedback != null && isShown,
         enter = fadeIn(),
         exit = fadeOut(animationSpec = MaterialTheme.motionScheme.slowEffectsSpec()),
         modifier = modifier,

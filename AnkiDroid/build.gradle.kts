@@ -37,8 +37,8 @@ idea {
 }
 
 val homePath: String? = System.getProperty("user.home")
-val baseVersionCode = 22300129
-val baseVersionName = "1.2.5"
+val baseVersionCode = 22300130
+val baseVersionName = "1.2.6"
 
 fun gitCommitHash(): String =
     try {

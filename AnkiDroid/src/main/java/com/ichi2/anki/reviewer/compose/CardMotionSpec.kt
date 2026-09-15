@@ -74,6 +74,13 @@ data class CardMotionSpec(
      * The tumble grows in across the whole flight, since the card only necks while it is held.
      */
     val throwSpeed: Float = 3.2f,
+    /**
+     * Release speed toward the corner, in card widths per second, at which a release counts as a throw
+     * and grades even short of [registerAt]. The same speed back toward the middle cancels a grade.
+     */
+    val flickSpeed: Float = 1.5f,
+    /** How far along the trip to a corner a throw must have carried the card before it counts. */
+    val flickReach: Float = 0.22f,
     /** How far the card pitches head over heels on a full-speed throw. */
     val tumbleDegrees: Float = 150f,
     /** How much the card narrows across its direction of travel when guided in slowly. */
@@ -101,6 +108,8 @@ data class CardMotionSpec(
     val wellFadeMillis: Int = 560,
     /** How strongly an untouched well glows once it can be used, so the corners announce themselves. */
     val wellIdleAlpha: Float = 0.1f,
+    /** How long the corner takes to ripple and settle once a card has sunk into it. */
+    val landMillis: Int = 520,
     /** How long the card's shadow takes to lift when picked up and to settle when put down. */
     val liftMillis: Int = 220,
     /**

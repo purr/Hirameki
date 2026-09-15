@@ -19,6 +19,7 @@ import android.view.HapticFeedbackConstants
 import android.webkit.WebView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -86,9 +87,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -106,6 +109,9 @@ private const val DEGREES_PER_RADIAN = 180f / Math.PI.toFloat()
 private const val WELL_FRACTION = 0.62f
 private const val FADE_STARTS_AT = 0.86f
 private const val TINT_ALPHA = 0.16f
+private const val LANDING_RING_ALPHA = 0.55f
+private const val LANDING_FLARE_ALPHA = 0.3f
+private const val LANDING_LABEL_POP = 0.22f
 private const val LABEL_IDLE_ALPHA = 0.55f
 private const val GLOW_SETTLED = 0.002f
 
@@ -114,9 +120,6 @@ private const val THUMB_LOCK_TOLERANCE_PX = 0.05f
 
 /** Most steps the thumb-lock solve may take; it normally settles well before this, see [DraggableFlashcard]. */
 private const val THUMB_LOCK_MAX_ITERATIONS = 64
-
-/** A throw faster than this blend counts as thrown, even short of the registering point. */
-private const val THROW_COUNTS_AT = 0.5f
 
 /** Slowest a graded flight may move, in px per ms, so a release from rest still arrives. */
 private const val MIN_FLIGHT_SPEED = 0.15f
@@ -293,6 +296,12 @@ fun DraggableFlashcard(
     var flightFromScale by remember { mutableFloatStateOf(1f) }
     var flightCorner by remember { mutableStateOf<GradeCorner?>(null) }
     var throwTarget by remember { mutableFloatStateOf(0f) }
+
+    // the corner a graded card sank into, and how far its ripple has spread: 1 is settled
+    var landedCorner by remember { mutableStateOf<GradeCorner?>(null) }
+    val landing = remember { Animatable(1f) }
+
+    fun landingOf(corner: GradeCorner): Float = if (corner == landedCorner) landing.value else 1f
 
     // composed while the answer is already up (coming back to the reviewer): start turned, not turning
     val flip = remember { Animatable(if (isAnswerShown) FULL_TURN else 0f) }
@@ -494,6 +503,12 @@ fun DraggableFlashcard(
             // hidden and disarmed until the view model delivers the next card. arriving in the corner is
             // not the next card being ready: shown again now, the old card could be graded a second time
             phase = CardPhase.Away
+            // the corner answers for the grade, in place of a separate notice of which rating it was
+            landedCorner = corner
+            scope.launch {
+                landing.snapTo(0f)
+                landing.animateTo(1f, tween(liveSpec.landMillis, easing = LinearEasing))
+            }
             liveRate(corner.rating)
         }
     }
@@ -561,10 +576,11 @@ fun DraggableFlashcard(
         // from rest to the corner, the line the journey uses: measured from the card to the corner, a
         // throw that carried the centre past the corner pointed away from it and was read as a retreat
         val towardsCorner = (velocity.x * axis.x + velocity.y * axis.y) / axisLength
-        val throwiness = liveSpec.throwiness(towardsCorner / cardWidth)
-        val retreating = towardsCorner < 0f && liveSpec.throwiness(-towardsCorner / cardWidth) > THROW_COUNTS_AT
+        val cardWidthsPerSecond = towardsCorner / cardWidth
+        val throwiness = liveSpec.throwiness(cardWidthsPerSecond)
+        val retreating = -cardWidthsPerSecond >= liveSpec.flickSpeed
         val journey = journeyOf(corner, cardOffset)
-        val thrown = throwiness > THROW_COUNTS_AT && journey > liveSpec.registerAt / 2f
+        val thrown = cardWidthsPerSecond >= liveSpec.flickSpeed && journey >= liveSpec.flickReach
         if (!retreating && (journey >= liveSpec.registerAt || thrown)) {
             dropInto(corner, towardsCorner.coerceAtLeast(0f) / 1000f, throwiness)
         } else {
@@ -653,7 +669,10 @@ fun DraggableFlashcard(
                 val down = awaitFirstDown(requireUnconsumed = false)
                 if (!(liveDragToGrade && liveAnswerShown) || phase == CardPhase.Away) return@awaitEachGesture
                 val cardAtDown = liveCardKey
+                // fed from the touch-down on: started at pickup, a short flick had too few samples for a
+                // speed at all, read as holding still, and the card drifted home instead of flying
                 val tracker = VelocityTracker()
+                tracker.addPointerInputChange(down)
                 var dragging = false
                 try {
                     while (true) {
@@ -689,6 +708,7 @@ fun DraggableFlashcard(
                             }
                             return@awaitEachGesture
                         }
+                        tracker.addPointerInputChange(change)
                         if (!dragging) {
                             val moved = change.position - down.position
                             if (moved.getDistance() < viewConfiguration.touchSlop) continue
@@ -708,16 +728,16 @@ fun DraggableFlashcard(
                             // flick grade a card nobody meant to grade; with the page at its end, the next
                             // swipe that way drags the card
                             if (scrollsPage) return@awaitEachGesture
-                            if (!pickUp(change.position, cardAtDown)) return@awaitEachGesture
+                            // taken where the finger came down, then moved by everything since: tested where the
+                            // finger is at the slop, a fast flick from near the card's edge had already left the
+                            // card and was dropped. the delta is applied exactly once, from the down position
+                            if (!pickUp(down.position, cardAtDown)) return@awaitEachGesture
                             dragging = true
-                            // pickUp already put the held point under this event's position; applying the
-                            // event's movement as well left the card one event ahead of the thumb all drag
                             change.consume()
-                            tracker.addPointerInputChange(change)
+                            dragBy(change.position - down.position)
                             continue
                         }
                         change.consume()
-                        tracker.addPointerInputChange(change)
                         dragBy(change.position - change.previousPosition)
                     }
                 } finally {
@@ -810,6 +830,7 @@ fun DraggableFlashcard(
                 idleAlpha = spec.wellIdleAlpha,
                 glow = { glows[corner.ordinal].floatValue },
                 fade = { armedAlpha },
+                landing = { landingOf(corner) },
             )
         }
 
@@ -965,6 +986,7 @@ fun DraggableFlashcard(
                 nextTime = nextTimes.getOrElse(corner.ordinal) { "" },
                 glow = { glows[corner.ordinal].floatValue },
                 fade = { armedAlpha },
+                landing = { landingOf(corner) },
             )
         }
     }
@@ -1004,10 +1026,10 @@ private fun CardFace(
 
 /**
  * The well that swallows the card: a soft bloom of the rating colour with rings that contract toward
- * the corner as the card approaches.
+ * the corner as the card approaches, and one ring that spreads back out once the card has sunk in.
  *
- * [glow] and [fade] are read lazily inside draw and layer scopes, so the drag repaints the well
- * without recomposing it.
+ * [glow], [fade] and [landing] are read lazily inside draw and layer scopes, so the drag repaints the
+ * well without recomposing it.
  */
 @Composable
 private fun BoxScope.CornerBloom(
@@ -1017,6 +1039,7 @@ private fun BoxScope.CornerBloom(
     idleAlpha: Float,
     glow: () -> Float,
     fade: () -> Float,
+    landing: () -> Float,
 ) {
     Box(
         modifier =
@@ -1025,15 +1048,36 @@ private fun BoxScope.CornerBloom(
                 .fillMaxSize(WELL_FRACTION),
     ) {
         Canvas(modifier = Modifier.matchParentSize()) {
-            val visibility = fade()
-            if (visibility <= 0f) return@Canvas
-            val p = glow() * visibility
             // the bloom radiates from the screen corner, which in RTL is on the other side of its box
             val focus =
                 Offset(
                     x = if (corner.isLeft(isRtl)) 0f else size.width,
                     y = if (corner.towardsTop) 0f else size.height,
                 )
+            // drawn apart from the fade: the wells fade out as soon as the graded card has gone, which is
+            // exactly when this plays
+            val t = landing()
+            if (t < 1f) {
+                val left = 1f - t
+                val spread = 1f - left * left
+                drawRect(
+                    brush =
+                        Brush.radialGradient(
+                            colors = listOf(color.copy(alpha = LANDING_FLARE_ALPHA * left * left), Color.Transparent),
+                            center = focus,
+                            radius = size.minDimension * (0.35f + 0.65f * spread),
+                        ),
+                )
+                drawCircle(
+                    color = color.copy(alpha = LANDING_RING_ALPHA * left),
+                    radius = size.minDimension * (0.12f + 0.9f * spread),
+                    center = focus,
+                    style = Stroke(width = (1.dp + 2.dp * left).toPx()),
+                )
+            }
+            val visibility = fade()
+            if (visibility <= 0f) return@Canvas
+            val p = glow() * visibility
             drawRect(
                 brush =
                     Brush.radialGradient(
@@ -1062,7 +1106,8 @@ private fun BoxScope.CornerBloom(
 
 /**
  * A corner's rating and the interval it would schedule, sitting above the card so it stays readable
- * while the card travels over it. Brightens and grows out of its corner as the card comes for it.
+ * while the card travels over it. Brightens and grows out of its corner as the card comes for it, and
+ * pops once when the card sinks in, which is how a grade by drag is confirmed.
  */
 @Composable
 private fun BoxScope.CornerLabel(
@@ -1072,6 +1117,7 @@ private fun BoxScope.CornerLabel(
     nextTime: String,
     glow: () -> Float,
     fade: () -> Float,
+    landing: () -> Float,
 ) {
     Column(
         modifier =
@@ -1080,8 +1126,10 @@ private fun BoxScope.CornerLabel(
                 .padding(WellLabelInset)
                 .graphicsLayer {
                     val p = glow()
-                    alpha = (LABEL_IDLE_ALPHA + (1f - LABEL_IDLE_ALPHA) * p) * fade()
-                    val grow = 1f + 0.16f * p
+                    val t = landing()
+                    // fully lit as the card lands, then fading, even though the wells around it are going
+                    alpha = max((LABEL_IDLE_ALPHA + (1f - LABEL_IDLE_ALPHA) * p) * fade(), 1f - t)
+                    val grow = (1f + 0.16f * p) * (1f + LANDING_LABEL_POP * sin(PI.toFloat() * t))
                     scaleX = grow
                     scaleY = grow
                     transformOrigin =
