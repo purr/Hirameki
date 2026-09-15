@@ -57,6 +57,111 @@ import com.ichi2.utils.toRGBHex
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 
+/** Centres a card's content vertically in its page, the way text sits on a physical card. */
+private const val CARD_CENTERING_CSS = """
+    html { height: 100%; }
+    body.card {
+        box-sizing: border-box;
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: safe center;
+        padding-top: 20px;
+        padding-bottom: 20px;
+    }
+"""
+
+/**
+ * Script loaded once into the page shell, beside the reviewer's own.
+ *
+ * Recolouring: a note type sets its colours in its own css, under any class name it likes, and the
+ * app never sees which, so a list of selectors always misses one — that is how a deck's main word
+ * stayed blue after `.cloze` and the editor swatches were covered. Matching the rendered colour
+ * cannot miss: anything whose computed text colour is a blue takes `--hirameki-primary`. Painting
+ * with the variable rather than a fixed colour means a theme change, which swaps the style block in
+ * place, recolours everything already themed. Other hues are untouched, so colour coding a deck
+ * relies on, like red and green, survives. Without the variable (hirameki css switched off) it does
+ * nothing.
+ *
+ * Replay buttons: a tapped button is marked playing until the app reports the sound has finished,
+ * through `window.hiramekiAudioStopped`, because the page itself never hears the native player.
+ *
+ * Lives in the shell rather than the style block: a style block swapped in via outerHTML would
+ * carry a script that never runs.
+ */
+private const val HIRAMEKI_PAGE_SCRIPT = """
+    <script id="hirameki-page">
+    (function () {
+        function primary() {
+            return getComputedStyle(document.documentElement).getPropertyValue('--hirameki-primary').trim();
+        }
+        function rgbOf(value) {
+            var match = /rgba?\(([^)]+)\)/.exec(value || '');
+            if (!match) return null;
+            var parts = match[1].split(',').map(function (part) { return parseFloat(part); });
+            if (parts.length > 3 && parts[3] === 0) return null;
+            return parts;
+        }
+        function isBlue(rgb) {
+            var r = rgb[0] / 255, g = rgb[1] / 255, b = rgb[2] / 255;
+            var max = Math.max(r, g, b), min = Math.min(r, g, b), spread = max - min;
+            // judged on colourfulness, not saturation alone: pale blues such as anki's night-mode
+            // lightblue must count, while grey-blues used for muted text, like slate, must not
+            if (max === 0 || spread < 0.15 || spread / max < 0.2) return false;
+            var hue = max === r ? ((g - b) / spread) % 6 : max === g ? (b - r) / spread + 2 : (r - g) / spread + 4;
+            hue *= 60;
+            if (hue < 0) hue += 360;
+            return hue >= 185 && hue <= 255;
+        }
+        function recolour() {
+            if (!document.body || !primary()) return;
+            var nodes = document.body.querySelectorAll('*');
+            for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                if (node.getAttribute('data-hirameki-themed')) continue;
+                var rgb = rgbOf(getComputedStyle(node).color);
+                if (rgb && isBlue(rgb)) {
+                    node.style.setProperty('color', 'var(--hirameki-primary)', 'important');
+                    node.setAttribute('data-hirameki-themed', '1');
+                }
+            }
+        }
+        var pending = false;
+        function schedule() {
+            if (pending) return;
+            pending = true;
+            requestAnimationFrame(function () { pending = false; recolour(); });
+        }
+        function clearPlaying() {
+            var playing = document.querySelectorAll('.replay-button.hirameki-playing');
+            for (var i = 0; i < playing.length; i++) playing[i].classList.remove('hirameki-playing');
+        }
+        window.hiramekiAudioStopped = clearPlaying;
+        function start() {
+            recolour();
+            // cards arrive by replacing the page content, so watch for it; attributes are not
+            // watched, which keeps the recolouring itself from re-triggering the observer
+            new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, characterData: true });
+            document.addEventListener('click', function (event) {
+                var button = event.target && event.target.closest && event.target.closest('.replay-button');
+                if (!button) return;
+                // one sound at a time: a new tap takes the playing state from any other button
+                clearPlaying();
+                button.classList.add('hirameki-playing');
+            }, true);
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', start);
+        } else {
+            start();
+        }
+    })();
+    </script>
+"""
+
+/** Tells the page the replay sound has finished, so the tapped button can stop looking busy. */
+private const val AUDIO_STOPPED_SCRIPT = "window.hiramekiAudioStopped && window.hiramekiAudioStopped();"
+
 /** Marker the tap probe returns when the tap landed on something the card itself handles. */
 private const val INTERACTIVE_TOKEN = "interactive"
 
@@ -116,6 +221,10 @@ fun Flashcard(
      * surface; a card face passes its own container tone.
      */
     pageColor: androidx.compose.ui.graphics.Color? = null,
+    /** Centre the content vertically in the page, as on a physical card, instead of top-aligning it. */
+    centerContent: Boolean = false,
+    /** A replay button's sound is playing; when it turns false the page restores the button. */
+    isAudioPlaying: Boolean = false,
 ) {
     val currentBaseUrl by rememberUpdatedState(baseUrl)
     val currentOnJavascriptCommandConsumed by rememberUpdatedState(onJavascriptCommandConsumed)
@@ -190,6 +299,7 @@ fun Flashcard(
             primaryContainerColorHex,
             onPrimaryContainerColorHex,
             outlineColorHex,
+            centerContent,
             currentStyle,
             currentPadding,
             toolbarHeight,
@@ -316,15 +426,23 @@ fun Flashcard(
                         min-height: 48px;
                         box-shadow: 0 1px 2px rgba(0,0,0,0.05);
                     }
-                    button:hover {
-                        background-color: ${surfaceContainerColorHex}D9;
-                        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                    /* hover only where a pointer can hover: on a touchscreen :hover sticks to
+                       whatever was tapped last, so a tapped button kept its hover look for good */
+                    @media (hover: hover) {
+                        button:hover {
+                            background-color: ${surfaceContainerColorHex}D9;
+                            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                        }
+                        body.card .replay-button:hover {
+                            opacity: 0.85;
+                        }
                     }
                     button:active {
                         background-color: ${surfaceContainerColorHex}B3;
                         transform: scale(0.97);
                     }
-                    button:focus {
+                    /* keyboard focus only: a tap focuses a button too, and :focus kept the outline */
+                    button:focus-visible {
                         outline: 2px solid ${primaryColorHex};
                         outline-offset: 2px;
                     }
@@ -350,9 +468,6 @@ fun Flashcard(
                         transition: transform 0.1s, opacity 0.2s;
                         -webkit-tap-highlight-color: transparent;
                     }
-                    body.card .replay-button:hover {
-                        opacity: 0.85;
-                    }
                     body.card .replay-button:active {
                         opacity: 0.7;
                         transform: scale(0.97);
@@ -370,6 +485,15 @@ fun Flashcard(
                     }
                     body.card .replay-button .play-action path {
                         fill: currentColor;
+                    }
+                    ${if (centerContent) CARD_CENTERING_CSS else ""}
+                    /* read by the page script, which repaints a deck's blue text in the theme accent */
+                    :root {
+                        --hirameki-primary: $primaryColorHex;
+                    }
+                    /* a replay button stays dimmed for exactly as long as its sound plays */
+                    body.card .replay-button.hirameki-playing {
+                        opacity: 0.4;
                     }
                 </style>
                 """.trimIndent()
@@ -565,6 +689,14 @@ fun Flashcard(
                     currentPayload.evalScript = evalScript
                 }
             }
+            (webView.tag as? FlashcardPayload)?.let { payload ->
+                // the page dims a tapped replay button itself, but only the app hears the native
+                // player finish, so the moment playback ends it tells the page to restore it
+                if (payload.audioPlaying && !isAudioPlaying) {
+                    webView.evaluateJavascript(AUDIO_STOPPED_SCRIPT, null)
+                }
+                payload.audioPlaying = isAudioPlaying
+            }
         }, onRelease = { webView ->
             webView.stopLoading()
             webView.webViewClient = WebViewClient()
@@ -573,7 +705,8 @@ fun Flashcard(
             webView.destroy()
         }, modifier = modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surface)
+                // match the page, so a card face never shows a band of the wrong tone while loading
+                .background(pageColor ?: MaterialTheme.colorScheme.surface)
         )
     }
 }
@@ -596,7 +729,8 @@ private class FlashcardPayload(
     var lastJavascriptCommandId: Int = -1,
     var scriptExecuted: Boolean = false,
     var shellLoaded: Boolean = false,
-    var pendingShellScript: String? = null
+    var pendingShellScript: String? = null,
+    var audioPlaying: Boolean = false,
 )
 
 private val EXTRA_JS_ASSETS = listOf("backend/js/reviewer_extras_bundle.js")
@@ -605,7 +739,7 @@ private const val REVIEWER_EXTRAS_CSS_LINK =
 
 private fun buildStyledHtml(context: Context, isNightMode: Boolean, composeStyle: String): String {
     val shell = stdHtml(context, EXTRA_JS_ASSETS, isNightMode)
-    return shell.replace("</head>", "$REVIEWER_EXTRAS_CSS_LINK\n$composeStyle\n</head>")
+    return shell.replace("</head>", "$REVIEWER_EXTRAS_CSS_LINK\n$composeStyle\n$HIRAMEKI_PAGE_SCRIPT\n</head>")
 }
 
 /**

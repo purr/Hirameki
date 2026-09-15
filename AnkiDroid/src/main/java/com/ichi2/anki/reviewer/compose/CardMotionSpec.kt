@@ -32,12 +32,12 @@ data class CardMotionSpec(
     /** Card shape as width divided by height: a bank card stood on its end (ISO/IEC 7810 ID-1). */
     val cardAspectRatio: Float = 53.98f / 85.6f,
     /** How much of the screen the card may cover, leaving the corners clear on every side. */
-    val cardSizeFraction: Float = 0.8f,
+    val cardSizeFraction: Float = 0.68f,
     /**
      * Smallest the card gets while a finger is still on it. It only shrinks past this once released,
      * so nothing ever disappears mid-drag.
      */
-    val dragFloorScale: Float = 0.3f,
+    val dragFloorScale: Float = 0.2f,
     /** Size the card has shrunk to by the time it reaches the corner, as a fraction of full size. */
     val minScale: Float = 0.08f,
     /**
@@ -47,8 +47,11 @@ data class CardMotionSpec(
     val shrinkCurve: Float = 1.15f,
     /** How far along the trip to a corner the rating locks in, so a release past it grades the card. */
     val registerAt: Float = 0.55f,
-    /** How strongly the corner takes the card off the finger as it approaches. 0 disables the magnet. */
-    val cornerPull: Float = 0.4f,
+    /**
+     * How strongly the corner takes the card off the finger as it approaches. 0, the default, keeps
+     * the card under the thumb the whole way; anything above drifts it toward the corner.
+     */
+    val cornerPull: Float = 0f,
     /** How far the flight path bows sideways, as a fraction of its length. 0 is a straight line. */
     val pathCurve: Float = 0.14f,
     /** Movement below this fraction of the card's shorter side picks no corner at all. */

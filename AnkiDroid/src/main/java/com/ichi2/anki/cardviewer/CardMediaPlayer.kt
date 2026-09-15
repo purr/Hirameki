@@ -128,6 +128,14 @@ class CardMediaPlayer : Closeable {
     var playAvTagsJob: Job? = null
     val isPlaying get() = playAvTagsJob != null
 
+    /**
+     * Suspends until the current playback has finished, been stopped, or failed. [playOne] only
+     * starts playback and returns straight away, so this is the way to learn when it is over.
+     */
+    suspend fun awaitIdle() {
+        playAvTagsJob?.join()
+    }
+
     private var onMediaGroupCompleted: (() -> Unit)? = null
 
     fun setOnMediaGroupCompletedListener(listener: (() -> Unit)?) {

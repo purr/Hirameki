@@ -109,6 +109,8 @@ data class ReviewerState(
     val mediaError: MediaError? = null,
     val colorizeAnswerButtons: Boolean = false,
     val showAnswerButtonBadges: Boolean = true,
+    /** A replay button's sound is playing, so the button can show it until the sound ends. */
+    val isAudioPlaying: Boolean = false,
 )
 
 data class AnswerFeedback(
@@ -735,10 +737,24 @@ class ReviewerViewModel(
                     }
                 }
             if (avTag is SoundOrVideoTag) {
-                cardMediaPlayer.playOne(avTag)
+                val generation = ++replayGeneration
+                _state.update { it.copy(isAudioPlaying = true) }
+                try {
+                    cardMediaPlayer.playOne(avTag)
+                    cardMediaPlayer.awaitIdle()
+                } finally {
+                    // a second tap cancels this playback and starts its own; only the latest replay
+                    // may clear the indicator, or the first would switch it off under the second
+                    if (generation == replayGeneration) {
+                        _state.update { it.copy(isAudioPlaying = false) }
+                    }
+                }
             }
         }
     }
+
+    /** Counts replay-button taps, so an older playback cannot clear a newer one's indicator. */
+    private var replayGeneration = 0
 
     private fun reloadCard() = launchCardAction { reloadCardSuspend() }
 

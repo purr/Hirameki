@@ -51,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -146,6 +147,7 @@ fun DraggableFlashcard(
     tapToFlip: Boolean,
     dragToGrade: Boolean,
     nextTimes: List<String>,
+    isAudioPlaying: Boolean,
     onShowAnswer: () -> Unit,
     onUnanswer: () -> Unit,
     onRateCard: (CardAnswer.Rating) -> Unit,
@@ -158,6 +160,8 @@ fun DraggableFlashcard(
     val ratingColors = LocalAnkiColors.current.ratings
 
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    var cardSizePx by remember { mutableStateOf(IntSize.Zero) }
+    var grabOrigin by remember { mutableStateOf(TransformOrigin.Center) }
     var rawOffset by remember { mutableStateOf(Offset.Zero) }
     var cardOffset by remember { mutableStateOf(Offset.Zero) }
     var activeCorner by remember { mutableStateOf<GradeCorner?>(null) }
@@ -372,16 +376,41 @@ fun DraggableFlashcard(
             )
         }
 
+    /**
+     * Where on the card the finger landed, as a fraction of its size. The card scales and tilts about
+     * this point, so whatever is under the thumb stays under the thumb as the card shrinks.
+     */
+    fun grabPointOf(
+        touch: Offset,
+        shown: Offset,
+    ): TransformOrigin {
+        if (cardSizePx == IntSize.Zero || containerSize == IntSize.Zero) return TransformOrigin.Center
+        val left = (containerSize.width - cardSizePx.width) / 2f + shown.x
+        val top = (containerSize.height - cardSizePx.height) / 2f + shown.y
+        return TransformOrigin(
+            pivotFractionX = ((touch.x - left) / cardSizePx.width).coerceIn(0f, 1f),
+            pivotFractionY = ((touch.y - top) / cardSizePx.height).coerceIn(0f, 1f),
+        )
+    }
+
     val isArmed = dragToGrade && isAnswerShown
     val dragModifier =
         if (isArmed) {
+            // on the container, not the card: inside the card's scale and tilt layers every drag
+            // delta arrives divided by the card's current size, so a card at 30% ran off at 3x the
+            // speed of the finger. out here, deltas are plain screen pixels.
             // keyed only on arming: a size change mid-drag must not cancel the gesture
             Modifier.pointerInput(isArmed) {
                 val tracker = VelocityTracker()
                 detectDragGestures(
-                    onDragStart = {
+                    onDragStart = { touch ->
                         tracker.resetTracking()
-                        rawOffset = cardOffset
+                        // a finger landing mid-flight takes the card from wherever it is drawn
+                        val shown = currentOffset()
+                        scope.launch { flight.stop() }
+                        rawOffset = shown
+                        cardOffset = shown
+                        grabOrigin = grabPointOf(touch, shown)
                         phase = CardPhase.Drag
                         isGrading = false
                         throwiness = 0f
@@ -455,7 +484,8 @@ fun DraggableFlashcard(
         modifier =
             modifier
                 .fillMaxSize()
-                .onSizeChanged { containerSize = it },
+                .onSizeChanged { containerSize = it }
+                .then(dragModifier),
     ) {
         // measured explicitly: a bank card's proportions, as large as fits inside the size fraction on
         // both axes. fillMaxSize() + aspectRatio() cannot do this, because tight constraints win.
@@ -477,8 +507,10 @@ fun DraggableFlashcard(
                 Modifier
                     .align(Alignment.Center)
                     .size(cardWidth, cardHeight)
-                    // 1: where the card is, how big it is, and how it leans
+                    .onSizeChanged { cardSizePx = it }
+                    // 1: where the card is, how big it is, and how it leans, all about the thumb
                     .graphicsLayer {
+                        transformOrigin = grabOrigin
                         val offset = currentOffset()
                         translationX = offset.x
                         translationY = offset.y
@@ -497,11 +529,13 @@ fun DraggableFlashcard(
                     }
                     // 2: line the frame up with the direction of travel
                     .graphicsLayer {
+                        transformOrigin = grabOrigin
                         val offset = currentOffset()
                         rotationZ = atan2(offset.y, offset.x) * DEGREES_PER_RADIAN
                     }
                     // 3: the two release behaviours, blended by how hard the card was thrown
                     .graphicsLayer {
+                        transformOrigin = grabOrigin
                         val journey = currentJourney()
                         rotationX = journey * spec.tumbleDegrees * throwiness
                         val funnel = 1f - throwiness
@@ -511,10 +545,10 @@ fun DraggableFlashcard(
                     }
                     // 4: back into the card's own frame
                     .graphicsLayer {
+                        transformOrigin = grabOrigin
                         val offset = currentOffset()
                         rotationZ = -atan2(offset.y, offset.x) * DEGREES_PER_RADIAN
-                    }.then(dragModifier)
-                    .semantics { customActions = ratingActions },
+                    }.semantics { customActions = ratingActions },
         ) {
             Box(
                 modifier =
@@ -568,6 +602,8 @@ fun DraggableFlashcard(
                         useStableLayout = true,
                         sideChangeDurationMs = 0,
                         pageColor = pageColor,
+                        centerContent = true,
+                        isAudioPlaying = isAudioPlaying,
                     )
                 }
 
@@ -603,6 +639,8 @@ fun DraggableFlashcard(
                         useStableLayout = true,
                         sideChangeDurationMs = 0,
                         pageColor = pageColor,
+                        centerContent = true,
+                        isAudioPlaying = isAudioPlaying,
                     )
                 }
             }

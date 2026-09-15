@@ -393,6 +393,7 @@ fun ReviewerContent(
                             tapToFlip = Prefs.cardTapToFlip,
                             dragToGrade = Prefs.cardDragToGrade,
                             nextTimes = state.nextTimes,
+                            isAudioPlaying = state.isAudioPlaying,
                             onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
                             onUnanswer = { viewModel.onEvent(ReviewerEvent.UnanswerCard) },
                             onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
@@ -413,6 +414,7 @@ fun ReviewerContent(
                             },
                             isAnswerShown = state.isAnswerShown,
                             toolbarHeight = (toolbarHeightDp + WhiteboardBottomBarOffset).value.toInt(),
+                            isAudioPlaying = state.isAudioPlaying,
                         )
                     }
 
