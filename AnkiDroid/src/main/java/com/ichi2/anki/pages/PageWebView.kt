@@ -36,6 +36,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -142,6 +144,10 @@ private fun PageWebViewInternal(
     var isLoading by remember { mutableStateOf(true) }
     var hasError by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    // bumped when the page's renderer dies, to replace the dead webview (see PageWebViewClient.onRendererGone)
+    var rendererGeneration by remember { mutableIntStateOf(0) }
+    // the page's renderer died again right after a rebuild, so the page shows an error instead of looping
+    var rendererFailed by remember { mutableStateOf(false) }
     val backgroundColor = MaterialTheme.colorScheme.background
     val backgroundColorArgb = remember(backgroundColor) { backgroundColor.toArgb() }
 
@@ -157,56 +163,73 @@ private fun PageWebViewInternal(
     }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        AndroidView(
-            factory = { ctx ->
-            WebView(ctx).apply {
-                with(settings) {
-                    javaScriptEnabled = true
-                    displayZoomControls = false
-                    builtInZoomControls = true
-                    setSupportZoom(true)
-                }
-                setBackgroundColor(backgroundColorArgb)
-                webViewClient = PageWebViewClient().apply {
-                    onPageFinishedCallbacks.add { webView ->
-                        isLoading = false
-                        webView.visibility = View.VISIBLE
-                    }
-                    onErrorCallbacks.add { error ->
-                        Timber.e("PageWebView error: %s", error.description)
-                        hasError = true
-                        isLoading = false
-                    }
-                }
-                webChromeClient = PageChromeClient()
-                visibility = View.INVISIBLE
-                webViewRef = this
+        if (!rendererFailed) {
+            // a webview never draws again once its renderer died. a new key releases it (onRelease destroys it)
+            // and builds a fresh one, whose update loads the page again
+            key(rendererGeneration) {
+                AndroidView(
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            with(settings) {
+                                javaScriptEnabled = true
+                                displayZoomControls = false
+                                builtInZoomControls = true
+                                setSupportZoom(true)
+                            }
+                            setBackgroundColor(backgroundColorArgb)
+                            webViewClient = PageWebViewClient().apply {
+                                onPageFinishedCallbacks.add { webView ->
+                                    isLoading = false
+                                    webView.visibility = View.VISIBLE
+                                }
+                                onErrorCallbacks.add { error ->
+                                    Timber.e("PageWebView error: %s", error.description)
+                                    hasError = true
+                                    isLoading = false
+                                }
+                                onRendererGone = { canRebuild ->
+                                    if (canRebuild) {
+                                        rendererGeneration++
+                                    } else {
+                                        rendererFailed = true
+                                        isLoading = false
+                                    }
+                                }
+                            }
+                            webChromeClient = PageChromeClient()
+                            visibility = View.INVISIBLE
+                            webViewRef = this
+                        }
+                    }, update = { webView ->
+                        val nightMode = if (Themes.currentTheme.isNightMode) "#night" else ""
+                        val url = "$serverBaseUrl$path$nightMode"
+                        if (webView.tag != url) {
+                            webView.tag = url
+                            isLoading = true
+                            hasError = false
+                            webView.visibility = View.INVISIBLE
+                            Timber.i("PageWebView: Loading %s", url)
+                            webView.loadUrl(url)
+                        }
+                    }, onRelease = { webView ->
+                        webView.stopLoading()
+                        (webView.webViewClient as? PageWebViewClient)?.release()
+                        webView.webViewClient = android.webkit.WebViewClient()
+                        webView.destroy()
+                        // a renderer rebuild (key change) runs the new webview's factory before this release of the
+                        // dead one, so the ref may already hold the new view: clearing it unconditionally would leave
+                        // it null and silently drop every later js command (e.g. the statistics deck picker)
+                        if (webViewRef === webView) webViewRef = null
+                    }, modifier = Modifier.fillMaxSize()
+                )
             }
-        }, update = { webView ->
-            val nightMode = if (Themes.currentTheme.isNightMode) "#night" else ""
-            val url = "$serverBaseUrl$path$nightMode"
-            if (webView.tag != url) {
-                webView.tag = url
-                isLoading = true
-                hasError = false
-                webView.visibility = View.INVISIBLE
-                Timber.i("PageWebView: Loading %s", url)
-                webView.loadUrl(url)
-            }
-        }, onRelease = { webView ->
-            webView.stopLoading()
-            (webView.webViewClient as? PageWebViewClient)?.release()
-            webView.webViewClient = android.webkit.WebViewClient()
-            webView.destroy()
-            webViewRef = null
-        }, modifier = Modifier.fillMaxSize()
-        )
+        }
 
         if (isLoading) {
             CircularWavyProgressIndicator()
         }
 
-        if (hasError) {
+        if (hasError || rendererFailed) {
             PageWebViewError()
         }
     }

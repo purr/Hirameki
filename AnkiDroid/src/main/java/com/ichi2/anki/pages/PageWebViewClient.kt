@@ -18,12 +18,19 @@ package com.ichi2.anki.pages
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.annotation.VisibleForTesting
+import androidx.core.net.toUri
 import androidx.core.view.isVisible
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.findViewTreeLifecycleOwner
 import com.google.android.material.color.MaterialColors
 import com.ichi2.anki.OnPageFinishedCallback
 import com.ichi2.utils.AssetHelper.guessMimeType
@@ -39,6 +46,13 @@ import java.io.IOException
 open class PageWebViewClient : WebViewClient() {
     val onPageFinishedCallbacks: MutableList<OnPageFinishedCallback> = mutableListOf()
     val onErrorCallbacks: MutableList<OnErrorCallback> = mutableListOf()
+
+    /**
+     * rebuilds the page in a fresh webview after its renderer died, see [onRenderProcessGone]. set by the host
+     * that owns the webview, as only the host can replace it. `canRebuild` is false when the same page died
+     * again within [REBUILD_LOOP_WINDOW_MS] of its last rebuild: the host then shows an error instead
+     */
+    var onRendererGone: ((canRebuild: Boolean) -> Unit)? = null
     private val pendingStyledCallbacks = mutableListOf<PendingStyledCallback>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -47,6 +61,7 @@ open class PageWebViewClient : WebViewClient() {
     private var startedThemeInjectionNavigationId = -1
     private var shownNavigationId = -1
     private var isReleased = false
+    private var isRendererGone = false
     private var pendingVisualStateCallback: PendingVisualStateCallback? = null
     private var cachedMaterial3Colors: Material3Colors? = null
     private var cachedMaterial3ThemeCss: String? = null
@@ -170,11 +185,27 @@ open class PageWebViewClient : WebViewClient() {
                 /* Bootstrap borders */
                 --bs-border-color: $outlineColor !important;
                 --bs-border-color-translucent: $outlineColor !important;
-                /* Deck options */
-                --deck-options-on-surface: $onSurfaceColor !important;
-                --deck-options-on-primary: $onPrimaryColor !important;
-                --deck-options-tertiary-container: $tertiaryContainerColor !important;
-                --deck-options-on-tertiary-container: $onTertiaryContainerColor !important;
+                /* material 3 roles for the rules in anki_material3_theme.css. no !important:
+                   upstream never defines these names, so there is nothing to override */
+                --m3-surface: $surfaceColor;
+                --m3-surface-container: $surfaceContainerColor;
+                --m3-surface-container-high: $surfaceContainerHighColor;
+                --m3-surface-container-highest: $surfaceContainerHighestColor;
+                --m3-on-surface: $onSurfaceColor;
+                --m3-on-surface-variant: $onSurfaceVariantColor;
+                --m3-outline: $outlineColor;
+                --m3-outline-variant: $outlineVariantColor;
+                --m3-primary: $primaryColor;
+                --m3-on-primary: $onPrimaryColor;
+                --m3-secondary-container: $secondaryContainerColor;
+                --m3-on-secondary-container: $onSecondaryContainerColor;
+                --m3-tertiary-container: $tertiaryContainerColor;
+                --m3-on-tertiary-container: $onTertiaryContainerColor;
+                --m3-error-container: $errorContainerColor;
+                --m3-on-error-container: $onErrorContainerColor;
+                /* switch handles with the check / close icon of the app's AnkiToggle */
+                --m3-switch-thumb-on: ${switchThumb(onPrimaryColor, onPrimaryContainerColor, CHECK_ICON_PATH)};
+                --m3-switch-thumb-off: ${switchThumb(outlineColor, surfaceContainerHighestColor, CLOSE_ICON_PATH)};
             }
 
             /* Style Bootstrap switch handle */
@@ -356,6 +387,12 @@ open class PageWebViewClient : WebViewClient() {
         val onSurfaceVariantColor: String,
         val surfaceContainerHighColor: String,
         val errorContainerColor: String,
+        val surfaceContainerHighestColor: String,
+        val outlineVariantColor: String,
+        val onPrimaryContainerColor: String,
+        val secondaryContainerColor: String,
+        val onSecondaryContainerColor: String,
+        val onErrorContainerColor: String,
     ) {
         companion object {
             fun from(webView: WebView): Material3Colors = Material3Colors(
@@ -395,6 +432,30 @@ open class PageWebViewClient : WebViewClient() {
                 errorContainerColor = colorHex(
                     webView,
                     com.google.android.material.R.attr.colorErrorContainer,
+                ),
+                surfaceContainerHighestColor = colorHex(
+                    webView,
+                    com.google.android.material.R.attr.colorSurfaceContainerHighest,
+                ),
+                outlineVariantColor = colorHex(
+                    webView,
+                    com.google.android.material.R.attr.colorOutlineVariant,
+                ),
+                onPrimaryContainerColor = colorHex(
+                    webView,
+                    com.google.android.material.R.attr.colorOnPrimaryContainer,
+                ),
+                secondaryContainerColor = colorHex(
+                    webView,
+                    com.google.android.material.R.attr.colorSecondaryContainer,
+                ),
+                onSecondaryContainerColor = colorHex(
+                    webView,
+                    com.google.android.material.R.attr.colorOnSecondaryContainer,
+                ),
+                onErrorContainerColor = colorHex(
+                    webView,
+                    com.google.android.material.R.attr.colorOnErrorContainer,
                 ),
             )
 
@@ -470,9 +531,86 @@ open class PageWebViewClient : WebViewClient() {
         }
     }
 
+    /**
+     * #143: chromium kills the whole app when any webview on a dead renderer leaves this unhandled: a SIGKILL
+     * when the system reclaimed the renderer, a crash when it crashed. these pages share the renderer with the
+     * reviewer's card and stay alive under it in the back stack, so the default (false) took the app down with
+     * the card. a dead webview never draws again, so [onRendererGone] has the host rebuild the page
+     */
+    override fun onRenderProcessGone(
+        view: WebView,
+        detail: RenderProcessGoneDetail,
+    ): Boolean {
+        val pagePath = view.url?.toUri()?.path
+        Timber.w("page renderer gone (crashed: %b): %s", detail.didCrash(), pagePath)
+        // a torn-down page needs no rebuild, and a page that is already being rebuilt needs only one
+        if (isReleased || isRendererGone) return true
+        isRendererGone = true
+        val onGone = onRendererGone
+        if (onGone == null) {
+            Timber.e("page renderer gone: no host rebuilds this page, it stays blank")
+            return true
+        }
+        val lifecycleOwner = view.findViewTreeLifecycleOwner()
+        if (lifecycleOwner == null) {
+            Timber.w("page renderer gone: the webview is not on a screen, nothing to rebuild")
+            return true
+        }
+        // a page that kills every fresh renderer (it crashes or runs out of memory while loading) must not be
+        // rebuilt forever. tracked per page for the process, because a rebuild replaces this client
+        val lastRebuild = pagePath?.let { lastRebuildByPath[it] }
+        val canRebuild = lastRebuild == null || SystemClock.elapsedRealtime() - lastRebuild >= REBUILD_LOOP_WINDOW_MS
+        if (!canRebuild) Timber.e("page renderer gone again soon after a rebuild, not rebuilding %s", pagePath)
+        // rebuild once the screen is started: a renderer started in the background tends to be reclaimed again
+        // (#8459). on a lifecycle that is already started, addObserver calls onStart at once
+        lifecycleOwner.lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    owner.lifecycle.removeObserver(this)
+                    // the host tore the page down while it waited, so there is nothing left to rebuild
+                    if (isReleased) return
+                    if (canRebuild && pagePath != null) lastRebuildByPath[pagePath] = SystemClock.elapsedRealtime()
+                    onGone(canRebuild)
+                }
+            },
+        )
+        return true
+    }
+
     companion object {
         private const val MATERIAL3_THEME_CSS_ASSET = "anki_material3_theme.css"
         private const val VISUAL_STATE_CALLBACK_TIMEOUT_MS = 300L
+
+        /**
+         * a page whose renderer dies again this soon after its rebuild is taken to kill every renderer.
+         * long enough for a slow page load plus the crash, short enough that unrelated deaths rarely fall inside
+         */
+        @VisibleForTesting
+        internal const val REBUILD_LOOP_WINDOW_MS = 30_000L
+
+        /** when each page path was last rebuilt after its renderer died, see [onRenderProcessGone] */
+        private val lastRebuildByPath = mutableMapOf<String, Long>()
+
+        /** material "check" and "close" icons, 24dp viewport */
+        private const val CHECK_ICON_PATH = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"
+        private const val CLOSE_ICON_PATH =
+            "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+
+        /**
+         * a 28px m3 switch handle as a css `url()`: a 24px [handleColor] disc around a 16px icon.
+         * the colours are baked in because an svg background image cannot read css variables.
+         */
+        private fun switchThumb(
+            handleColor: String,
+            iconColor: String,
+            iconPath: String,
+        ): String {
+            fun encode(color: String) = color.replace("#", "%23")
+            return "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3e" +
+                "%3ccircle cx='14' cy='14' r='12' fill='${encode(handleColor)}'/%3e" +
+                "%3cpath transform='translate(6 6) scale(.6667)' fill='${encode(iconColor)}' d='$iconPath'/%3e" +
+                "%3c/svg%3e\")"
+        }
     }
 }
 
