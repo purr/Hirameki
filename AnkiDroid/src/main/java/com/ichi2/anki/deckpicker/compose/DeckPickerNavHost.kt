@@ -681,6 +681,10 @@ private fun DeckPickerWithDrawer(
         gesturesEnabled = !state.fragmented || state.drawerState.targetValue != DrawerValue.Closed,
         drawerContent = {
             ModalDrawerSheet(
+                // the drawerState overload is the one that handles back: it closes the drawer and
+                // shrinks it with the predictive back gesture. the modifier-only overload registers
+                // no back handler, so back with the drawer open used to leave the app
+                drawerState = state.drawerState,
                 modifier = Modifier.width(310.dp),
             ) {
                 Column(
@@ -760,6 +764,9 @@ private fun DeckPickerWithDrawer(
             snackbarHostState = state.snackbarHostState,
             syncState = state.syncState,
             isInInitialState = state.isInInitialState,
+            // the exact condition that enables the drawer sheet's own back handler (material3
+            // DrawerPredictiveBackHandler), so exactly one of the two handles back
+            isDrawerOpen = state.drawerState.targetValue == DrawerValue.Open,
         )
     }
 }

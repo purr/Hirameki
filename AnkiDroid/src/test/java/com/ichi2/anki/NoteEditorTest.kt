@@ -342,6 +342,46 @@ class NoteEditorTest : RobolectricTest() {
     }
 
     @Test
+    fun `back is intercepted only while the note has unsaved changes`() = runTest {
+        val editor = getNoteEditorAdding(NoteType.BASIC).build()
+        idleMainLooper()
+        assertThat(
+            "a clean editor leaves back to the system (predictive back animation)",
+            !editor.onBackPressedDispatcher.hasEnabledCallbacks(),
+        )
+
+        editor.setFieldValueFromUi(0, "Hello")
+        idleMainLooper()
+        assertThat("an edited field intercepts back", editor.onBackPressedDispatcher.hasEnabledCallbacks())
+
+        editor.setFieldValueFromUi(0, "")
+        idleMainLooper()
+        assertThat("reverting the edit releases back", !editor.onBackPressedDispatcher.hasEnabledCallbacks())
+
+        editor.viewModel.toggleStickyField(0)
+        idleMainLooper()
+        assertThat("a sticky toggle intercepts back", editor.onBackPressedDispatcher.hasEnabledCallbacks())
+    }
+
+    @Test
+    fun `a system back after adding a note reports the note as added`() = runTest {
+        val editor = getNoteEditorAdding(NoteType.BASIC).withFirstField("Hello").build()
+        idleMainLooper()
+
+        editor.saveNote()
+        idleMainLooper()
+
+        assertThat("saved: back is left to the system", !editor.onBackPressedDispatcher.hasEnabledCallbacks())
+        // the system finishes the editor without closeNoteEditor(), so the result must already be set
+        val shadowEditor = shadowOf(editor)
+        assertThat(shadowEditor.resultCode, equalTo(Activity.RESULT_OK))
+        assertThat(
+            shadowEditor.resultIntent.getBooleanExtra(NoteEditorActivity.NOTE_CHANGED_EXTRA_KEY, false),
+            equalTo(true),
+        )
+    }
+
+    @Test
     fun `pinned field remains unsaved after saving added note`() = runTest {
         val editor = getNoteEditorAdding(NoteType.BASIC).build()
         idleMainLooper()

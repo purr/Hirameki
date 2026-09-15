@@ -35,6 +35,9 @@ This project is currently in **active development** and is available on Google P
 - **Expressive Motion**: Smooth, intentional animations for a more fluid experience.
 - **Modernized Layouts**: Focused on the latest Android design standards.
 - **AnkiWeb Compatibility**: Built on the robust core of AnkiDroid, maintaining sync compatibility with AnkiWeb and the [FSRS algorithm](https://github.com/open-spaced-repetition).
+- **Card View Reviewer**: Study with a physical-feeling card: tap to flip it, then drag or flick it into a corner to grade (Again, Hard, Good, Easy). Each part can be switched off in Settings > Reviewing > Card view.
+- **Predictive Back**: Back gestures preview the screen you are returning to, and back closes drawers, selections and searches first.
+- **Arabic-Script Font**: Arabic, Persian, Urdu and Kurdish text uses [Vazirmatn](https://github.com/rastikerdar/vazirmatn) instead of the system's print font, in the app and on cards. Toggle it in Settings > Appearance > Themes.
 
 ---
 
@@ -85,3 +88,4 @@ This project inherits the licenses of the original AnkiDroid project:
 * [GPL-3.0 License](https://github.com/ankidroid/Anki-Android/blob/main/COPYING)
 * [AGPL-3.0 License](https://github.com/ankitects/anki/blob/main/LICENSE) for core back-end components.
 * [LGPL-3.0 License](https://github.com/ankidroid/Anki-Android/blob/main/api/COPYING.LESSER) for the AnkiDroid API.
+* [SIL Open Font License 1.1](https://github.com/rastikerdar/vazirmatn/blob/master/OFL.txt) for the bundled Vazirmatn font (licence text in `AnkiDroid/src/main/assets/fonts/vazirmatn/OFL.txt`).

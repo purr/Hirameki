@@ -22,7 +22,6 @@ import android.view.HapticFeedbackConstants
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -105,6 +104,7 @@ import com.ichi2.anki.ui.compose.components.ExpandableFab
 import com.ichi2.anki.ui.compose.components.ExpandableFabContainer
 import com.ichi2.anki.ui.compose.components.Scrim
 import com.ichi2.anki.ui.compose.components.SyncIcon
+import com.ichi2.anki.ui.compose.components.predictiveBackSearchAnim
 import com.ichi2.anki.ui.compose.theme.AnkiDroidTheme
 import com.ichi2.utils.MorphShape
 
@@ -375,6 +375,7 @@ fun DeckPickerContent(
 private fun DeckPickerTopBar(
     isSearchOpen: Boolean,
     onSearchOpenChange: (Boolean) -> Unit,
+    isDrawerOpen: Boolean,
     searchQuery: String,
     onSearchQueryChanged: (String) -> Unit,
     isSyncing: Boolean,
@@ -386,12 +387,9 @@ private fun DeckPickerTopBar(
 ) {
     var isMoreOptionsMenuOpen by remember { mutableStateOf(false) }
     val searchFocusRequester = remember { FocusRequester() }
-    val searchAnim by animateFloatAsState(
-        targetValue = if (isSearchOpen) 1f else 0f,
-        animationSpec = motionScheme.defaultEffectsSpec(),
-    )
-
-    BackHandler(isSearchOpen) {
+    // a drawer dragged open over the search owns back: the first back closes the drawer, the next
+    // one the search. without this the search's handler, registered later, closed the hidden search
+    val searchAnim by predictiveBackSearchAnim(isSearchOpen, backEnabled = !isDrawerOpen) {
         onSearchQueryChanged("")
         onSearchOpenChange(false)
     }
@@ -577,6 +575,8 @@ fun MoreOptionsMenu(
  * @param fragmented Whether the deck picker is currently using the split tablet layout.
  * @param studyOptionsData The currently selected deck summary for the study options panel.
  * @param requestSearchFocus One-shot flag used by outer navigation state to reopen deck search.
+ * @param isDrawerOpen whether the navigation drawer over this screen is open or opening. back then
+ * belongs to the drawer, so an open search leaves it alone.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -598,6 +598,7 @@ fun DeckPickerScreen(
     onSearchFocusRequested: () -> Unit,
     syncState: SyncIconState,
     isInInitialState: Boolean?,
+    isDrawerOpen: Boolean,
     modifier: Modifier = Modifier,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
 ) {
@@ -634,6 +635,7 @@ fun DeckPickerScreen(
                 DeckPickerTopBar(
                     isSearchOpen = isSearchOpen,
                     onSearchOpenChange = { isSearchOpen = it },
+                    isDrawerOpen = isDrawerOpen,
                     searchQuery = searchQuery,
                     onSearchQueryChanged = onSearchQueryChanged,
                     isSyncing = isSyncing,
@@ -728,6 +730,7 @@ fun DeckPickerTopBarPreview() {
     AnkiDroidTheme {
         DeckPickerTopBar(
             isSearchOpen = false,
+            isDrawerOpen = false,
             onSearchOpenChange = {},
             searchQuery = "",
             onSearchQueryChanged = {},
@@ -752,6 +755,7 @@ fun DeckPickerTopBarSearchOpenPreview() {
     AnkiDroidTheme {
         DeckPickerTopBar(
             isSearchOpen = true,
+            isDrawerOpen = false,
             onSearchOpenChange = {},
             searchQuery = "Japanese",
             onSearchQueryChanged = {},

@@ -161,6 +161,31 @@ class CardTemplateEditorTest : RobolectricTest() {
     }
 
     @Test
+    fun `adding a card type makes back ask before discarding`() {
+        val intent = Intent(Intent.ACTION_VIEW)
+        intent.putExtra("noteTypeId", getCurrentDatabaseNoteTypeCopy("Basic").id)
+        val templateEditorController =
+            Robolectric
+                .buildActivity(CardTemplateEditor::class.java, intent)
+                .create()
+                .start()
+                .resume()
+                .visible()
+        saveControllerForCleanup(templateEditorController)
+        val testEditor = templateEditorController.get()
+        assertFalse("a clean editor leaves back to the system", testEditor.displayDiscardChangesCallback.isEnabled)
+
+        // nothing is typed: the text watcher used to be the only place the back callback was refreshed
+        assertTrue("Unable to click?", shadowOf(testEditor).clickMenuItem(R.id.action_add))
+        advanceRobolectricLooper()
+        clickAlertDialogButton(DialogInterface.BUTTON_POSITIVE, true)
+        advanceRobolectricLooper()
+
+        assertEquals("Note type should have 2 templates now", 2, testEditor.tempNoteType?.templateCount)
+        assertTrue("back must ask before discarding the new card type", testEditor.displayDiscardChangesCallback.isEnabled)
+    }
+
+    @Test
     fun testDeleteTemplate() {
         val noteTypeName = "Basic (and reversed card)"
 
@@ -189,6 +214,7 @@ class CardTemplateEditorTest : RobolectricTest() {
         advanceRobolectricLooper()
         assertTrue("Note type should have changed", testEditor.noteTypeHasChanged())
         assertEquals("Note type should have 1 template now", 1, testEditor.tempNoteType?.templateCount)
+        assertTrue("back must ask before discarding the deletion", testEditor.displayDiscardChangesCallback.isEnabled)
 
         // Try to delete the template again, but there's only one
         assertTrue("Unable to click?", shadowTestEditor.clickMenuItem(R.id.action_delete))

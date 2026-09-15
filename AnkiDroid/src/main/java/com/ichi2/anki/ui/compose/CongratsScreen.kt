@@ -20,7 +20,6 @@
  ****************************************************************************************/
 package com.ichi2.anki.ui.compose
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -72,7 +71,9 @@ fun CongratsScreen(
     onCustomStudy: () -> Unit,
     timeUntilNextDay: Long
 ) {
-    BackHandler { onNavigateUp() }
+    // no BackHandler here: both hosts already handle back. NavDisplay pops this entry with the
+    // predictive pop animation and CongratsActivity is finished by the system (cross-activity
+    // animation); an unconditional handler overrode both
     AnkiDroidTheme {
         Scaffold(topBar = {
             TopAppBar(
