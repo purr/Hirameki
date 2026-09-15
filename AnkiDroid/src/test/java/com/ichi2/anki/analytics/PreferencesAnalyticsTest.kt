@@ -92,6 +92,7 @@ class PreferencesAnalyticsTest : RobolectricTest() {
             R.string.card_view_reviewer_key, // cardViewReviewer
             R.string.card_tap_to_flip_key, // cardTapToFlip
             R.string.card_drag_to_grade_key, // cardDragToGrade
+            R.string.arabic_script_font_key, // arabicScriptFont
         ).toStringResourceSet()
 
     @Test
