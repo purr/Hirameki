@@ -89,6 +89,9 @@ class PreferencesAnalyticsTest : RobolectricTest() {
             R.string.pref_language_key, // language
             R.string.custom_sync_certificate_key, // customSyncCertificate
             R.string.apply_hirameki_css_preference, // applyHiramekiCss
+            R.string.card_view_reviewer_key, // cardViewReviewer
+            R.string.card_tap_to_flip_key, // cardTapToFlip
+            R.string.card_drag_to_grade_key, // cardDragToGrade
         ).toStringResourceSet()
 
     @Test

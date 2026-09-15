@@ -40,7 +40,6 @@ import com.ichi2.anki.libanki.Card
 import com.ichi2.anki.libanki.CardId
 import com.ichi2.anki.libanki.Collection
 import com.ichi2.anki.libanki.Sound
-import com.ichi2.anki.libanki.SoundOrVideoTag
 import com.ichi2.anki.libanki.Tags
 import com.ichi2.anki.libanki.TemplateManager.TemplateRenderContext.TemplateRenderOutput
 import com.ichi2.anki.libanki.TtsPlayer
@@ -109,8 +108,12 @@ data class ReviewerState(
     val mediaError: MediaError? = null,
     val colorizeAnswerButtons: Boolean = false,
     val showAnswerButtonBadges: Boolean = true,
-    /** A replay button's sound is playing, so the button can show it until the sound ends. */
-    val isAudioPlaying: Boolean = false,
+    /**
+     * Counts finished replay-button taps, successful or not. The card page dims a replay button the
+     * moment it is tapped and restores it whenever this changes. A count rather than an is-playing flag:
+     * state flows drop a flag that turns on and off within one frame, and the button would stay dim.
+     */
+    val replayFinished: Int = 0,
 )
 
 data class AnswerFeedback(
@@ -725,29 +728,32 @@ class ReviewerViewModel(
         side: String,
         index: Int,
     ) {
+        // taken before any suspension, so a sound that ends while this tap is still looking up its tag
+        // cannot count as this tap finishing
+        val generation = ++replayGeneration
         viewModelScope.launch {
-            val card = currentCard ?: return@launch
-            val avTag =
-                withCol {
-                    val renderOutput = card.renderOutput(this)
-                    when (side) {
-                        "q" -> renderOutput.questionAvTags.getOrNull(index)
-                        "a" -> renderOutput.answerAvTags.getOrNull(index)
-                        else -> null
+            try {
+                val card = currentCard ?: return@launch
+                val avTag =
+                    withCol {
+                        val renderOutput = card.renderOutput(this)
+                        when (side) {
+                            "q" -> renderOutput.questionAvTags.getOrNull(index)
+                            "a" -> renderOutput.answerAvTags.getOrNull(index)
+                            else -> null
+                        }
                     }
-                }
-            if (avTag is SoundOrVideoTag) {
-                val generation = ++replayGeneration
-                _state.update { it.copy(isAudioPlaying = true) }
-                try {
+                // any tag the player understands, text to speech included: playOne handles both, and
+                // filtering to sound files left tts replay buttons silent
+                if (avTag != null) {
                     cardMediaPlayer.playOne(avTag)
                     cardMediaPlayer.awaitIdle()
-                } finally {
-                    // a second tap cancels this playback and starts its own; only the latest replay
-                    // may clear the indicator, or the first would switch it off under the second
-                    if (generation == replayGeneration) {
-                        _state.update { it.copy(isAudioPlaying = false) }
-                    }
+                }
+            } finally {
+                // every tap must end in a signal, found tag or not, or its button stays dimmed. a second
+                // tap cancels this playback and starts its own; only the latest may report finishing
+                if (generation == replayGeneration) {
+                    _state.update { it.copy(replayFinished = it.replayFinished + 1) }
                 }
             }
         }
@@ -863,6 +869,13 @@ class ReviewerViewModel(
 
     private fun rateCard(rating: CardAnswer.Rating) {
         val queue = queueState ?: return
+        // a rating is only meaningful once the answer has been seen. the answer buttons already only
+        // offer ratings after reveal, but a gesture that began on the previous card can land after the
+        // next card loads; grading that card unseen would write a wrong review and a wrong interval
+        if (!_state.value.isAnswerShown) {
+            Timber.w("ignoring a rating for a card whose answer is not shown")
+            return
+        }
 
         launchCardAction {
             var wasLeech = false

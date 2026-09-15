@@ -45,25 +45,34 @@ data class CardMotionSpec(
      * it is close to the corner, then shrinks hard.
      */
     val shrinkCurve: Float = 1.15f,
-    /** How far along the trip to a corner the rating locks in, so a release past it grades the card. */
-    val registerAt: Float = 0.55f,
     /**
-     * How strongly the corner takes the card off the finger as it approaches. 0, the default, keeps
-     * the card under the thumb the whole way; anything above drifts it toward the corner.
+     * How far along the trip to a corner the card's centre must be for a release to grade it. Measured
+     * on where the card is drawn, not on how far the thumb has travelled.
      */
-    val cornerPull: Float = 0f,
+    val registerAt: Float = 0.55f,
     /** How far the flight path bows sideways, as a fraction of its length. 0 is a straight line. */
     val pathCurve: Float = 0.14f,
     /** Movement below this fraction of the card's shorter side picks no corner at all. */
     val deadZone: Float = 0.06f,
+    /**
+     * How far outside the card, as a fraction of its shorter side, a touch still picks it up. Beyond
+     * that the gesture belongs to whatever is under the finger.
+     */
+    val grabMargin: Float = 0.06f,
     /** Where a corner sits, as a fraction of the container's shorter side in from that corner. */
     val cornerInset: Float = 0.12f,
     /** Sideways lean while dragging, at the point where the card has crossed a full card width. */
     val tiltDegrees: Float = 9f,
     // ---- the two release behaviours, blended by speed ----
-    /** Release speed, in card widths per second, at or below which the card only necks. */
+    /**
+     * Release speed toward the corner, in card widths per second, at or below which the card only
+     * necks. Only the part of the motion heading for the corner counts.
+     */
     val funnelSpeed: Float = 0.6f,
-    /** Release speed, in card widths per second, at or above which the card only tumbles. */
+    /**
+     * Release speed toward the corner, in card widths per second, at or above which it only tumbles.
+     * The tumble grows in across the whole flight, since the card only necks while it is held.
+     */
     val throwSpeed: Float = 3.2f,
     /** How far the card pitches head over heels on a full-speed throw. */
     val tumbleDegrees: Float = 150f,
@@ -78,6 +87,12 @@ data class CardMotionSpec(
     val minDropMillis: Int = 120,
     /** How long the card takes to drift home when released without grading. */
     val homeMillis: Int = 300,
+    /**
+     * How long a graded card stays hidden waiting for the next one before it is shown again. The view
+     * model ignores a rating while another card action is still running, and a rating that never
+     * lands must not leave the reviewer with no card on screen.
+     */
+    val awayTimeoutMillis: Int = 2500,
     /** How long the next card takes to fade in. */
     val enterMillis: Int = 240,
     /** How long the card takes to turn over when the answer is revealed. */

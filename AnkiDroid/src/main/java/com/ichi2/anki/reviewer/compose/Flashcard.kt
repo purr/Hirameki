@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.viewinterop.AndroidView
 import com.ichi2.anki.R
 import com.ichi2.anki.ViewerResourceHandler
+import com.ichi2.anki.multimedia.SILENT_PAUSE_DATASET_KEY
 import com.ichi2.anki.preferences.sharedPrefs
 import com.ichi2.anki.previewer.stdHtml
 import com.ichi2.anki.reviewer.ReviewerJavascriptCommand
@@ -56,20 +57,6 @@ import com.ichi2.themes.Themes
 import com.ichi2.utils.toRGBHex
 import kotlinx.serialization.json.Json
 import timber.log.Timber
-
-/** Centres a card's content vertically in its page, the way text sits on a physical card. */
-private const val CARD_CENTERING_CSS = """
-    html { height: 100%; }
-    body.card {
-        box-sizing: border-box;
-        min-height: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: safe center;
-        padding-top: 20px;
-        padding-bottom: 20px;
-    }
-"""
 
 /**
  * Script loaded once into the page shell, beside the reviewer's own.
@@ -113,14 +100,23 @@ private const val HIRAMEKI_PAGE_SCRIPT = """
             if (hue < 0) hue += 360;
             return hue >= 185 && hue <= 255;
         }
+        // hirameki's own emphasis is already themed: recolouring it would paint the cloze chip's text in the
+        // same accent as its background whenever the theme itself is blue
+        var OWN_EMPHASIS = '.cloze, .cloze *, mark, mark *, .replay-button, .replay-button *';
         function recolour() {
             if (!document.body || !primary()) return;
+            var bodyColour = getComputedStyle(document.body).color;
             var nodes = document.body.querySelectorAll('*');
             for (var i = 0; i < nodes.length; i++) {
                 var node = nodes[i];
                 if (node.getAttribute('data-hirameki-themed')) continue;
-                var rgb = rgbOf(getComputedStyle(node).color);
-                if (rgb && isBlue(rgb)) {
+                if (node.matches(OWN_EMPHASIS)) continue;
+                var colour = getComputedStyle(node).color;
+                var rgb = rgbOf(colour);
+                // bold is how most decks mark the word being learnt. only bold that is still the plain body
+                // colour takes the accent; bold inside text a deck coloured on purpose keeps that colour
+                var plainBold = (node.tagName === 'B' || node.tagName === 'STRONG') && colour === bodyColour;
+                if ((rgb && isBlue(rgb)) || plainBold) {
                     node.style.setProperty('color', 'var(--hirameki-primary)', 'important');
                     node.setAttribute('data-hirameki-themed', '1');
                 }
@@ -161,6 +157,21 @@ private const val HIRAMEKI_PAGE_SCRIPT = """
 
 /** Tells the page the replay sound has finished, so the tapped button can stop looking busy. */
 private const val AUDIO_STOPPED_SCRIPT = "window.hiramekiAudioStopped && window.hiramekiAudioStopped();"
+
+/**
+ * Pauses the page's own playing audio and video, for a card face being turned away. Each is marked
+ * first: a video's onpause reports a pause to the app, which reads it as the user pausing and stops the
+ * answer side's autoplay sequence, and it skips a marked one. The mark is cleared by a listener added
+ * after that onpause, so it runs after it. The pause event itself still reaches everything else, the
+ * video's own controls included; swallowing it left their play button showing a paused video as playing.
+ */
+private const val PAUSE_MEDIA_SCRIPT =
+    "document.querySelectorAll('audio, video').forEach(function (m) {" +
+        " if (m.paused) return;" +
+        " m.dataset.$SILENT_PAUSE_DATASET_KEY = '1';" +
+        " m.addEventListener('pause', function () { delete m.dataset.$SILENT_PAUSE_DATASET_KEY; }, { once: true });" +
+        " m.pause();" +
+        " });"
 
 /** Marker the tap probe returns when the tap landed on something the card itself handles. */
 private const val INTERACTIVE_TOKEN = "interactive"
@@ -221,15 +232,25 @@ fun Flashcard(
      * surface; a card face passes its own container tone.
      */
     pageColor: androidx.compose.ui.graphics.Color? = null,
-    /** Centre the content vertically in the page, as on a physical card, instead of top-aligning it. */
-    centerContent: Boolean = false,
-    /** A replay button's sound is playing; when it turns false the page restores the button. */
-    isAudioPlaying: Boolean = false,
+    /**
+     * Counts replay taps that have finished playing. Each change tells the page to restore its dimmed
+     * replay button; a count rather than an on/off flag, because a sound that starts and stops within
+     * one frame would never be seen as a flag at all.
+     */
+    replayFinished: Int = 0,
+    /** Whether this page is the one on screen; a page that stops showing pauses its own media. */
+    isShowing: Boolean = true,
+    /**
+     * Told when a page's webview is created (true) and released (false). A card change swaps the page
+     * for a new webview before the old one is released, so a holder must only forget the one released.
+     */
+    onWebView: (webView: WebView, alive: Boolean) -> Unit = { _, _ -> },
 ) {
     val currentBaseUrl by rememberUpdatedState(baseUrl)
     val currentOnJavascriptCommandConsumed by rememberUpdatedState(onJavascriptCommandConsumed)
     val currentOnLinkClick by rememberUpdatedState(onLinkClick)
     val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnWebView by rememberUpdatedState(onWebView)
 
     val context = LocalContext.current
     val sharedPrefs = remember(context) { context.sharedPrefs() }
@@ -268,8 +289,9 @@ fun Flashcard(
     val outlineColor = MaterialTheme.colorScheme.outline
     val outlineColorHex = outlineColor.toArgb().toRGBHex()
     // selection and links otherwise render in the webview's stock blue, ignoring the wallpaper theme
-    val primaryContainerColorHex = MaterialTheme.colorScheme.primaryContainer.toArgb().toRGBHex()
-    val onPrimaryContainerColorHex = MaterialTheme.colorScheme.onPrimaryContainer.toArgb().toRGBHex()
+    val colorScheme = MaterialTheme.colorScheme
+    val primaryContainerColorHex = colorScheme.primaryContainer.toArgb().toRGBHex()
+    val onPrimaryContainerColorHex = colorScheme.onPrimaryContainer.toArgb().toRGBHex()
     val typography = MaterialTheme.typography
     val displayLargeStyle = typography.displayMedium
     val bodyLargeStyle = typography.titleLarge
@@ -299,7 +321,6 @@ fun Flashcard(
             primaryContainerColorHex,
             onPrimaryContainerColorHex,
             outlineColorHex,
-            centerContent,
             currentStyle,
             currentPadding,
             toolbarHeight,
@@ -354,12 +375,6 @@ fun Flashcard(
                         color: $primaryColorHex;
                         -webkit-tap-highlight-color: ${primaryContainerColorHex}59;
                     }
-                    /* bold is how most decks mark the word being learnt, so it takes the theme's
-                       accent instead of only a heavier weight of the body colour */
-                    b, strong {
-                        color: $primaryColorHex;
-                        font-weight: 700;
-                    }
                     mark {
                         background-color: ${primaryContainerColorHex}80;
                         color: $onPrimaryContainerColorHex;
@@ -388,7 +403,10 @@ fun Flashcard(
                         height: 2px;
                         background-color: ${primaryColorHex}59;
                         opacity: 1;
-                        margin: 16px 18%;
+                        width: 64%;
+                        /* auto side margins centre it at whatever width or max-width the note type
+                           gives it; equal percentage margins only centred it at the width they assumed */
+                        margin: 16px auto !important;
                         border-radius: 1px;
                     }
                     /* the editor's "blue" swatch, which is unreadable on a dark card; other colours a
@@ -486,7 +504,6 @@ fun Flashcard(
                     body.card .replay-button .play-action path {
                         fill: currentColor;
                     }
-                    ${if (centerContent) CARD_CENTERING_CSS else ""}
                     /* read by the page script, which repaints a deck's blue text in the theme accent */
                     :root {
                         --hirameki-primary: $primaryColorHex;
@@ -614,6 +631,7 @@ fun Flashcard(
                 }
 
                 setBackgroundColor(Color.TRANSPARENT)
+                currentOnWebView(this, true)
             }
         }, update = { webView ->
             webView.settings.mediaPlaybackRequiresUserGesture = !isMediaAutoplayEnabled
@@ -691,13 +709,19 @@ fun Flashcard(
             }
             (webView.tag as? FlashcardPayload)?.let { payload ->
                 // the page dims a tapped replay button itself, but only the app hears the native
-                // player finish, so the moment playback ends it tells the page to restore it
-                if (payload.audioPlaying && !isAudioPlaying) {
+                // player finish; every finished replay bumps the count, and each change restores it
+                if (payload.replayFinished != replayFinished) {
                     webView.evaluateJavascript(AUDIO_STOPPED_SCRIPT, null)
+                    payload.replayFinished = replayFinished
                 }
-                payload.audioPlaying = isAudioPlaying
+                // a face turned away keeps its page loaded for the next flip, but must stop playing
+                if (payload.showing && !isShowing) {
+                    webView.evaluateJavascript(PAUSE_MEDIA_SCRIPT, null)
+                }
+                payload.showing = isShowing
             }
         }, onRelease = { webView ->
+            currentOnWebView(webView, false)
             webView.stopLoading()
             webView.webViewClient = WebViewClient()
             webView.webChromeClient = null
@@ -730,7 +754,8 @@ private class FlashcardPayload(
     var scriptExecuted: Boolean = false,
     var shellLoaded: Boolean = false,
     var pendingShellScript: String? = null,
-    var audioPlaying: Boolean = false,
+    var replayFinished: Int = 0,
+    var showing: Boolean = true,
 )
 
 private val EXTRA_JS_ASSETS = listOf("backend/js/reviewer_extras_bundle.js")
@@ -796,8 +821,12 @@ private fun buildShellUpdateScript(
         document.documentElement.className = '$docClass';
         document.documentElement.setAttribute('data-bs-theme', '$baseTheme');
         document.body.className = '$bodyClass';
-        const s = document.getElementById('compose-styles');
-        if (s) s.outerHTML = `$escapedCss`;
+        {
+            // a block, not a top-level const: every evaluateJavascript call shares the page's global
+            // scope, so a second shell update redeclaring `s` threw a SyntaxError and applied nothing
+            const s = document.getElementById('compose-styles');
+            if (s) s.outerHTML = `$escapedCss`;
+        }
         $evalScript
     """.trimIndent()
 }

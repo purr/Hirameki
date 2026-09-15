@@ -123,6 +123,9 @@ import kotlin.time.Duration.Companion.milliseconds
 
 private val WhiteboardToolbarWidth = 56.dp
 private val WhiteboardBottomBarOffset = 48.dp
+
+/** Gap between the voice playback toolbar and the answer buttons, or the screen offset when they are hidden. */
+private val VoiceToolbarGap = 16.dp
 private const val AnswerIndicatorDuration = 1000L
 
 // You can rename this class to be more descriptive
@@ -202,6 +205,28 @@ fun ReviewerContent(
     val whiteboardToolbarHeightDp = with(LocalDensity.current) { whiteboardToolbarHeight.toDp() }
     val totalBottomPadding =
         toolbarHeightDp + (if (state.isWhiteboardEnabled) whiteboardToolbarHeightDp + 8.dp else 0.dp)
+
+    // the card view replaces the flashcard and the answer buttons together. it cannot serve type-in
+    // answers (the text field lives inside the buttons) or whiteboard sessions (the canvas needs the
+    // touches), so those keep the classic layout.
+    val useCardView = Prefs.cardViewReviewer && !state.showTypeInAnswer && !state.isWhiteboardEnabled
+
+    // the card only stands in for the buttons on a step it can perform itself: with tap-to-reveal off it
+    // cannot show the answer, with drag-to-grade off it cannot rate, and without buttons the session
+    // would stall with no way forward
+    val cardCoversThisStep =
+        useCardView && (if (state.isAnswerShown) Prefs.cardDragToGrade else Prefs.cardTapToFlip)
+
+    // with only one card gesture on, the answer buttons come and go between the two steps. their room is
+    // kept on both, so the card neither jumps nor reflows in the middle of the flip
+    val keepsAnswerBarRoom =
+        !cardCoversThisStep || (useCardView && !(Prefs.cardTapToFlip && Prefs.cardDragToGrade))
+
+    // the measured button height is only written while the answer buttons are on screen, so it goes
+    // stale once the card hides them; things stacked above the buttons read this instead
+    val answerBarHeightDp = if (keepsAnswerBarRoom) toolbarHeightDp else 0.dp
+    var voiceToolbarHeight by remember { mutableIntStateOf(0) }
+    val voiceToolbarHeightDp = with(LocalDensity.current) { voiceToolbarHeight.toDp() }
     val context = LocalContext.current
     val currentContext by rememberUpdatedState(context)
     val snackbarHostState = remember { SnackbarHostState() }
@@ -318,7 +343,7 @@ fun ReviewerContent(
         Scaffold(snackbarHost = {
             SnackbarHost(
                 snackbarHostState,
-                modifier = Modifier.padding(bottom = toolbarHeightDp + 32.dp),
+                modifier = Modifier.padding(bottom = answerBarHeightDp + 32.dp),
             ) { data ->
                 Snackbar(
                     snackbarData = data,
@@ -339,7 +364,9 @@ fun ReviewerContent(
                 onToggleMark = { viewModel.onEvent(ReviewerEvent.ToggleMark) },
                 onSetFlag = { viewModel.onEvent(ReviewerEvent.SetFlag(it)) },
                 isAnswerShown = state.isAnswerShown,
-                showMoreOptions = Prefs.moreOptionsInTopAppBar,
+                // the overflow button normally sits in the answer buttons, which the card view hides; the
+                // menu (undo, edit, bury, suspend, whiteboard) must live in the top bar or be unreachable
+                showMoreOptions = Prefs.moreOptionsInTopAppBar || useCardView,
                 onMoreOptionsClick = { showBottomSheet = true },
             ) { viewModel.onEvent(ReviewerEvent.UnanswerCard) }
         }) { paddingValues ->
@@ -371,14 +398,22 @@ fun ReviewerContent(
                         color = MaterialTheme.colorScheme.surfaceContainer,
                     ) {}
 
-                    // the card view replaces the flashcard and the answer buttons together. it cannot
-                    // serve type-in answers (the text field lives inside the buttons) or whiteboard
-                    // sessions (the canvas needs the touches), so those keep the classic layout.
-                    val useCardView =
-                        Prefs.cardViewReviewer && !state.showTypeInAnswer && !state.isWhiteboardEnabled
-
                     if (useCardView) {
+                        val voiceToolbarShown =
+                            state.isVoicePlaybackEnabled &&
+                                voicePlaybackViewModel?.isVisible?.collectAsStateWithLifecycle()?.value == true
+                        // the card's room ends where the highest thing along the bottom begins: the voice
+                        // toolbar, which stacks above the answer buttons, or else the answer buttons' room.
+                        // mirrors the offsets those toolbars are placed with below
+                        val bottomRoom =
+                            when {
+                                voiceToolbarShown ->
+                                    ScreenOffset + answerBarHeightDp + VoiceToolbarGap + voiceToolbarHeightDp
+                                keepsAnswerBarRoom -> ScreenOffset + answerBarHeightDp
+                                else -> 0.dp
+                            }
                         DraggableFlashcard(
+                            cardKey = state.cardDisplayIndex,
                             baseUrl = state.baseUrl,
                             questionHtml = state.questionHtml,
                             answerHtml = state.answerHtml,
@@ -393,11 +428,11 @@ fun ReviewerContent(
                             tapToFlip = Prefs.cardTapToFlip,
                             dragToGrade = Prefs.cardDragToGrade,
                             nextTimes = state.nextTimes,
-                            isAudioPlaying = state.isAudioPlaying,
+                            replayFinished = state.replayFinished,
                             onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
                             onUnanswer = { viewModel.onEvent(ReviewerEvent.UnanswerCard) },
                             onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
-                            modifier = Modifier.padding(bottom = paddingValues.calculateBottomPadding()),
+                            modifier = Modifier.padding(bottom = paddingValues.calculateBottomPadding() + bottomRoom),
                         )
                     } else {
                         Flashcard(
@@ -414,7 +449,7 @@ fun ReviewerContent(
                             },
                             isAnswerShown = state.isAnswerShown,
                             toolbarHeight = (toolbarHeightDp + WhiteboardBottomBarOffset).value.toInt(),
-                            isAudioPlaying = state.isAudioPlaying,
+                            replayFinished = state.replayFinished,
                         )
                     }
 
@@ -505,13 +540,17 @@ fun ReviewerContent(
                                 modifier =
                                     Modifier
                                         .align(Alignment.BottomCenter)
-                                        .offset(y = -ScreenOffset - toolbarHeightDp - 16.dp)
-                                        .padding(bottom = paddingValues.calculateBottomPadding()),
+                                        .offset(y = -ScreenOffset - answerBarHeightDp - VoiceToolbarGap)
+                                        .padding(bottom = paddingValues.calculateBottomPadding())
+                                        // after the inset padding, so it measures the toolbar alone: a modifier
+                                        // sees everything after it in the chain, and measured first it counted
+                                        // the navigation bar, which the card's padding already clears
+                                        .onSizeChanged { voiceToolbarHeight = it.height },
                             )
                         }
                     }
 
-                    if (!useCardView) {
+                    if (!cardCoversThisStep) {
                         AnswerButtons(
                             modifier =
                                 Modifier
@@ -532,7 +571,8 @@ fun ReviewerContent(
                             onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
                             onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
                             nextTimes = state.nextTimes,
-                            moreOptionsInTopAppBar = Prefs.moreOptionsInTopAppBar,
+                            // in card view the menu already sits in the top bar; do not offer it twice
+                            moreOptionsInTopAppBar = Prefs.moreOptionsInTopAppBar || useCardView,
                             onMoreOptionsClick = { showBottomSheet = true },
                         )
                     }

@@ -264,6 +264,10 @@ class ReviewerViewModelTest : RobolectricTest() {
                 equalTo(1L),
             )
 
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
             viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.EASY))
             testScheduler.advanceUntilIdle()
             advanceRobolectricLooper()
@@ -273,6 +277,29 @@ class ReviewerViewModelTest : RobolectricTest() {
                 viewModel.state.first().cardDisplayIndex,
                 equalTo(2L),
             )
+        }
+
+    @Test
+    fun `rating a card before its answer is shown is ignored`() =
+        runTest {
+            addBasicNote("Front 1", "Back 1")
+            addBasicNote("Front 2", "Back 2")
+
+            val testDispatcher = StandardTestDispatcher(testScheduler)
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), testDispatcher)
+
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            // a drag that began on the previous card can land after this one loads
+            viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.EASY))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = viewModel.state.first()
+            assertThat("the unseen card is not graded", state.cardDisplayIndex, equalTo(1L))
+            assertThat("no new card was answered", state.newCount, equalTo(2))
         }
 
     @Test
@@ -292,6 +319,10 @@ class ReviewerViewModelTest : RobolectricTest() {
                 viewModel.state.first().cardDisplayIndex,
                 equalTo(1L),
             )
+
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
 
             // Rating AGAIN keeps the same card in the learning queue
             viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.AGAIN))
