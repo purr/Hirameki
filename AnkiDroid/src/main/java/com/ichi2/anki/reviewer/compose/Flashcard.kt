@@ -110,7 +110,12 @@ fun Flashcard(
      */
     useStableLayout: Boolean = false,
     /** Length of the fade between question and answer. 0 swaps instantly, e.g. hidden by a flip. */
-    sideChangeDurationMs: Int = 300
+    sideChangeDurationMs: Int = 300,
+    /**
+     * Page background, so the card html matches the surface it is drawn on. Defaults to the theme
+     * surface; a card face passes its own container tone.
+     */
+    pageColor: androidx.compose.ui.graphics.Color? = null,
 ) {
     val currentBaseUrl by rememberUpdatedState(baseUrl)
     val currentOnJavascriptCommandConsumed by rememberUpdatedState(onJavascriptCommandConsumed)
@@ -143,7 +148,7 @@ fun Flashcard(
     }
 
     val isNightMode = Themes.currentTheme.isNightMode
-    val surfaceColor = MaterialTheme.colorScheme.surface
+    val surfaceColor = pageColor ?: MaterialTheme.colorScheme.surface
     val surfaceColorHex = surfaceColor.toArgb().toRGBHex()
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
     val onSurfaceColorHex = onSurfaceColor.toArgb().toRGBHex()
@@ -239,14 +244,50 @@ fun Flashcard(
                         color: $primaryColorHex;
                         -webkit-tap-highlight-color: ${primaryContainerColorHex}59;
                     }
-                    b, strong, .highlight, mark {
-                        color: inherit;
+                    /* bold is how most decks mark the word being learnt, so it takes the theme's
+                       accent instead of only a heavier weight of the body colour */
+                    b, strong {
+                        color: $primaryColorHex;
+                        font-weight: 700;
                     }
                     mark {
                         background-color: ${primaryContainerColorHex}80;
                         color: $onPrimaryContainerColorHex;
                         border-radius: 4px;
                         padding: 0 2px;
+                    }
+                    /* anki's stock cloze note type hard-codes blue (lightblue at night) for the target
+                       word; a primary-container chip carries the same emphasis and follows the wallpaper */
+                    .cloze, .nightMode .cloze, .night_mode .cloze {
+                        color: $onPrimaryContainerColorHex !important;
+                        background-color: ${primaryContainerColorHex}B3;
+                        border-radius: 8px;
+                        padding: 1px 7px;
+                        font-weight: 700;
+                    }
+                    /* the note's other deletions are context, not the target */
+                    .cloze-inactive, .nightMode .cloze-inactive, .night_mode .cloze-inactive {
+                        color: inherit !important;
+                    }
+                    .cloze-hint {
+                        color: $primaryColorHex !important;
+                    }
+                    /* the divider between question and answer in the stock templates */
+                    hr#answer {
+                        border: none;
+                        height: 2px;
+                        background-color: ${primaryColorHex}59;
+                        opacity: 1;
+                        margin: 16px 18%;
+                        border-radius: 1px;
+                    }
+                    /* the editor's "blue" swatch, which is unreadable on a dark card; other colours a
+                       deck uses on purpose, like gender colouring, are left alone */
+                    font[color="blue" i], font[color="#0000ff" i], font[color="#00f" i],
+                    [style*="color: blue" i], [style*="color:blue" i],
+                    [style*="color: #0000ff" i], [style*="color:#0000ff" i],
+                    [style*="color: rgb(0, 0, 255)" i] {
+                        color: $primaryColorHex !important;
                     }
                     body.card.nightMode, body.card.night_mode {
                         background-color: $surfaceColorHex;

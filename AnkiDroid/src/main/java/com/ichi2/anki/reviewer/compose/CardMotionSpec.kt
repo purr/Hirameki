@@ -32,19 +32,19 @@ data class CardMotionSpec(
     /** Card shape as width divided by height: a bank card stood on its end (ISO/IEC 7810 ID-1). */
     val cardAspectRatio: Float = 53.98f / 85.6f,
     /** How much of the screen the card may cover, leaving the corners clear on every side. */
-    val cardSizeFraction: Float = 0.84f,
+    val cardSizeFraction: Float = 0.8f,
     /**
      * Smallest the card gets while a finger is still on it. It only shrinks past this once released,
      * so nothing ever disappears mid-drag.
      */
-    val dragFloorScale: Float = 0.5f,
+    val dragFloorScale: Float = 0.3f,
     /** Size the card has shrunk to by the time it reaches the corner, as a fraction of full size. */
     val minScale: Float = 0.08f,
     /**
      * Shape of the shrink against distance travelled. 1 is linear; above 1 keeps the card large until
      * it is close to the corner, then shrinks hard.
      */
-    val shrinkCurve: Float = 1.4f,
+    val shrinkCurve: Float = 1.15f,
     /** How far along the trip to a corner the rating locks in, so a release past it grades the card. */
     val registerAt: Float = 0.55f,
     /** How strongly the corner takes the card off the finger as it approaches. 0 disables the magnet. */
@@ -80,7 +80,11 @@ data class CardMotionSpec(
     /** How long the card takes to turn over when the answer is revealed. */
     val flipMillis: Int = 400,
     /** How long the corner wells take to appear once the answer is showing, and to fade when it is not. */
-    val wellFadeMillis: Int = 320,
+    val wellFadeMillis: Int = 560,
+    /** How strongly an untouched well glows once it can be used, so the corners announce themselves. */
+    val wellIdleAlpha: Float = 0.1f,
+    /** How long the card's shadow takes to lift when picked up and to settle when put down. */
+    val liftMillis: Int = 220,
     /**
      * How quickly a corner's glow chases the card each frame, 0..1. Low is a slow, soft bloom; 1 makes
      * the colour snap the instant the card crosses into another corner.

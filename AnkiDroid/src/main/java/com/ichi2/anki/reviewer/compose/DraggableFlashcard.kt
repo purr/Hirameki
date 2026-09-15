@@ -18,18 +18,21 @@ package com.ichi2.anki.reviewer.compose
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -49,6 +52,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
@@ -59,6 +63,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -67,6 +72,7 @@ import com.ichi2.anki.R
 import com.ichi2.anki.reviewer.ReviewerJavascriptCommand
 import com.ichi2.anki.ui.compose.theme.LocalAnkiColors
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.min
@@ -75,6 +81,10 @@ import kotlin.math.pow
 private val WellLabelInset = 18.dp
 private val RestElevation = 2.dp
 private val DragElevation = 14.dp
+private val FrontBorder = 1.dp
+private val BackBorder = 1.5.dp
+private const val BACK_TINT = 0.14f
+private const val BACK_BORDER_ALPHA = 0.55f
 private const val CAMERA_DISTANCE_DP = 14f
 private const val HALF_TURN = 90f
 private const val FULL_TURN = 180f
@@ -160,6 +170,7 @@ fun DraggableFlashcard(
     var flightVia by remember { mutableStateOf(Offset.Zero) }
     var flightTo by remember { mutableStateOf(Offset.Zero) }
     var flightFromScale by remember { mutableFloatStateOf(1f) }
+    var flightCorner by remember { mutableStateOf<GradeCorner?>(null) }
 
     val flip = remember { Animatable(0f) }
     val entrance = remember { Animatable(1f) }
@@ -187,23 +198,34 @@ fun DraggableFlashcard(
         return ((offset.x * anchor.x + offset.y * anchor.y) / lengthSquared).coerceIn(0f, 1f)
     }
 
-    fun cornerUnder(offset: Offset): GradeCorner? {
-        if (containerSize == IntSize.Zero) return null
-        val dead = min(containerSize.width, containerSize.height) * spec.deadZone
-        if (offset.getDistance() < dead) return null
+    /** The corner whose quarter of the screen [offset] points into, with no dead zone. */
+    fun quadrantOf(offset: Offset): GradeCorner {
         val towardsStart = (offset.x < 0f) != isRtl
         val towardsTop = offset.y < 0f
         return GradeCorner.entries.first { it.towardsStart == towardsStart && it.towardsTop == towardsTop }
     }
 
-    /** The corner takes the card off the finger as it closes in. */
-    fun magnetised(
-        raw: Offset,
-        corner: GradeCorner?,
-    ): Offset {
-        if (corner == null || spec.cornerPull <= 0f) return raw
+    /** The corner a release would grade into: none until the card has left the middle. */
+    fun cornerUnder(offset: Offset): GradeCorner? {
+        if (containerSize == IntSize.Zero) return null
+        val dead = min(containerSize.width, containerSize.height) * spec.deadZone
+        if (offset.getDistance() < dead) return null
+        return quadrantOf(offset)
+    }
+
+    /**
+     * The corner takes the card off the finger as it closes in.
+     *
+     * The pull fades to nothing along the two axes that divide the corners. Without that, sliding
+     * straight from one corner to its neighbour swaps the anchor mid-drag and the card jumps across;
+     * with it, the pull hands over from one corner to the next through zero.
+     */
+    fun magnetised(raw: Offset): Offset {
+        if (spec.cornerPull <= 0f || raw == Offset.Zero) return raw
+        val corner = quadrantOf(raw)
         val anchor = anchorFor(corner)
-        val grip = journeyOf(corner, raw).pow(MAGNET_CURVE) * spec.cornerPull
+        val offAxis = 2f * min(abs(raw.x), abs(raw.y)) / (abs(raw.x) + abs(raw.y))
+        val grip = journeyOf(corner, raw).pow(MAGNET_CURVE) * spec.cornerPull * offAxis
         return Offset(raw.x + (anchor.x - raw.x) * grip, raw.y + (anchor.y - raw.y) * grip)
     }
 
@@ -219,7 +241,16 @@ fun DraggableFlashcard(
             cardOffset
         }
 
-    fun currentJourney(): Float = activeCorner?.let { journeyOf(it, currentOffset()) } ?: 0f
+    /**
+     * How far toward its corner the card is, used for its size, tint and tilt. It reads the quadrant
+     * directly rather than [activeCorner], so it is continuous from the first pixel of movement: the
+     * dead zone only decides what a release grades, never how the card looks.
+     */
+    fun currentJourney(): Float {
+        val offset = currentOffset()
+        val corner = if (phase == CardPhase.Flight && isGrading) flightCorner ?: quadrantOf(offset) else quadrantOf(offset)
+        return journeyOf(corner, offset)
+    }
 
     /**
      * While a finger is down the card only shrinks to the drag floor, so it can always be seen and
@@ -239,6 +270,7 @@ fun DraggableFlashcard(
     fun resetToRest() {
         phase = CardPhase.Idle
         isGrading = false
+        flightCorner = null
         cardOffset = Offset.Zero
         rawOffset = Offset.Zero
         activeCorner = null
@@ -284,6 +316,7 @@ fun DraggableFlashcard(
                 .coerceIn(spec.minDropMillis, spec.maxDropMillis)
         view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
         isGrading = true
+        flightCorner = corner
         startFlight(anchor, millis) {
             onRateCard(corner.rating)
             resetToRest()
@@ -370,7 +403,7 @@ fun DraggableFlashcard(
                     tracker.addPosition(change.uptimeMillis, change.position)
                     rawOffset += dragAmount
                     val corner = cornerUnder(rawOffset)
-                    cardOffset = magnetised(rawOffset, corner)
+                    cardOffset = magnetised(rawOffset)
                     if (corner != activeCorner) {
                         if (corner != null) view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         activeCorner = corner
@@ -396,7 +429,7 @@ fun DraggableFlashcard(
                 val current = glows[index].floatValue
                 val next = current + (target - current) * spec.wellSmoothing
                 // settling exactly stops the redraws once nothing is moving
-                glows[index].floatValue = if (kotlin.math.abs(target - next) < 0.002f) target else next
+                glows[index].floatValue = if (abs(target - next) < 0.002f) target else next
             }
         }
     }
@@ -407,16 +440,29 @@ fun DraggableFlashcard(
         label = "wellArmedAlpha",
     )
 
-    Box(
+    // the shadow lifts with the card instead of jumping, so picking it up has no seam
+    val elevation by animateDpAsState(
+        targetValue = if (phase == CardPhase.Drag) DragElevation else RestElevation,
+        animationSpec = tween(spec.liftMillis, easing = FastOutSlowInEasing),
+        label = "cardLift",
+    )
+
+    BoxWithConstraints(
         modifier =
             modifier
                 .fillMaxSize()
                 .onSizeChanged { containerSize = it },
     ) {
+        // measured explicitly: a bank card's proportions, as large as fits inside the size fraction on
+        // both axes. fillMaxSize() + aspectRatio() cannot do this, because tight constraints win.
+        val cardWidth = min(maxWidth.value * spec.cardSizeFraction, maxHeight.value * spec.cardSizeFraction * spec.cardAspectRatio).dp
+        val cardHeight = (cardWidth.value / spec.cardAspectRatio).dp
+
         for (corner in GradeCorner.entries) {
             CornerBloom(
                 corner = corner,
                 color = ratingColors.forRating(corner.rating).color,
+                idleAlpha = spec.wellIdleAlpha,
                 glow = { glows[corner.ordinal].floatValue },
                 fade = { armedAlpha },
             )
@@ -426,9 +472,7 @@ fun DraggableFlashcard(
             modifier =
                 Modifier
                     .align(Alignment.Center)
-                    // a bank card's proportions, kept clear of every edge so the wells stay reachable
-                    .fillMaxSize(spec.cardSizeFraction)
-                    .aspectRatio(spec.cardAspectRatio)
+                    .size(cardWidth, cardHeight)
                     // 1: where the card is, how big it is, and how it leans
                     .graphicsLayer {
                         val offset = currentOffset()
@@ -475,48 +519,78 @@ fun DraggableFlashcard(
                         cameraDistance = CAMERA_DISTANCE_DP * density
                     },
             ) {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    shape = MaterialTheme.shapes.extraLarge,
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = if (phase == CardPhase.Drag) DragElevation else RestElevation,
-                ) {
-                    Box(
-                        // un-mirror the content once the card is past edge-on
-                        modifier = Modifier.graphicsLayer { rotationY = if (flip.value > HALF_TURN) FULL_TURN else 0f },
-                    ) {
-                        Flashcard(
-                            baseUrl = baseUrl,
-                            questionHtml = questionHtml,
-                            answerHtml = answerHtml,
-                            bodyClass = bodyClass,
-                            isMediaAutoplayEnabled = isMediaAutoplayEnabled,
-                            javascriptCommand = javascriptCommand,
-                            onJavascriptCommandConsumed = onJavascriptCommandConsumed,
-                            // tapping turns the card over either way, so a reveal can be taken back
-                            onTap = {
-                                if (tapToFlip) {
-                                    if (isAnswerShown) onUnanswer() else onShowAnswer()
-                                }
-                            },
-                            onLinkClick = onLinkClick,
-                            // the sides swap while the card is edge-on, where a fade would never be seen
-                            isAnswerShown = flip.value > HALF_TURN,
-                            toolbarHeight = 0,
-                            useStableLayout = true,
-                            sideChangeDurationMs = 0,
-                        )
-
-                        val tint = activeCorner?.let { ratingColors.forRating(it.rating).color } ?: Color.Transparent
-                        Box(
-                            modifier =
-                                Modifier
-                                    .matchParentSize()
-                                    .graphicsLayer {
-                                        alpha = (currentJourney() / spec.registerAt).coerceIn(0f, 1f) * TINT_ALPHA
-                                    }.background(tint),
-                        )
+                // tapping turns the card over either way, so a reveal can be taken back
+                val onFaceTap: () -> Unit = {
+                    if (tapToFlip) {
+                        if (isAnswerShown) onUnanswer() else onShowAnswer()
                     }
+                }
+                val tint = activeCorner?.let { ratingColors.forRating(it.rating).color } ?: Color.Transparent
+                val tintAlpha = { (currentJourney() / spec.registerAt).coerceIn(0f, 1f) * TINT_ALPHA }
+                val colors = MaterialTheme.colorScheme
+                // the answer side is a step lighter and tinted toward the theme, so it is never
+                // mistaken for the question side at a glance
+                val backColor = lerp(colors.surfaceContainerHighest, colors.primaryContainer, BACK_TINT)
+
+                // two real faces, both painted as soon as the card loads: the flip only reveals a side
+                // that is already rendered, instead of swapping the html while the card turns
+                CardFace(
+                    modifier = Modifier.graphicsLayer { alpha = if (flip.value <= HALF_TURN) 1f else 0f },
+                    color = colors.surfaceContainerHigh,
+                    border = BorderStroke(FrontBorder, colors.outlineVariant),
+                    elevation = elevation,
+                    tint = tint,
+                    tintAlpha = tintAlpha,
+                ) { pageColor ->
+                    Flashcard(
+                        baseUrl = baseUrl,
+                        questionHtml = questionHtml,
+                        answerHtml = answerHtml,
+                        bodyClass = bodyClass,
+                        isMediaAutoplayEnabled = isMediaAutoplayEnabled && !isAnswerShown,
+                        javascriptCommand = if (isAnswerShown) null else javascriptCommand,
+                        onJavascriptCommandConsumed = onJavascriptCommandConsumed,
+                        onTap = onFaceTap,
+                        onLinkClick = onLinkClick,
+                        isAnswerShown = false,
+                        toolbarHeight = 0,
+                        useStableLayout = true,
+                        sideChangeDurationMs = 0,
+                        pageColor = pageColor,
+                    )
+                }
+
+                CardFace(
+                    // pre-turned half a revolution, so it reads the right way round once flipped to
+                    modifier =
+                        Modifier.graphicsLayer {
+                            rotationY = FULL_TURN
+                            alpha = if (flip.value > HALF_TURN) 1f else 0f
+                        },
+                    color = backColor,
+                    border = BorderStroke(BackBorder, colors.primary.copy(alpha = BACK_BORDER_ALPHA)),
+                    elevation = elevation,
+                    tint = tint,
+                    tintAlpha = tintAlpha,
+                ) { pageColor ->
+                    Flashcard(
+                        baseUrl = baseUrl,
+                        questionHtml = questionHtml,
+                        answerHtml = answerHtml,
+                        bodyClass = bodyClass,
+                        // audio is autoplayed by the view model on reveal; the hidden face must not
+                        // start any page media of its own while the question is still up
+                        isMediaAutoplayEnabled = isMediaAutoplayEnabled && isAnswerShown,
+                        javascriptCommand = if (isAnswerShown) javascriptCommand else null,
+                        onJavascriptCommandConsumed = onJavascriptCommandConsumed,
+                        onTap = onFaceTap,
+                        onLinkClick = onLinkClick,
+                        isAnswerShown = true,
+                        toolbarHeight = 0,
+                        useStableLayout = true,
+                        sideChangeDurationMs = 0,
+                        pageColor = pageColor,
+                    )
                 }
             }
         }
@@ -535,6 +609,40 @@ fun DraggableFlashcard(
 }
 
 /**
+ * One side of the card: a Material surface in its own tone and border, with the page drawn in that
+ * same tone, and the corner colour washed over it as the card is aimed.
+ */
+@Composable
+private fun CardFace(
+    color: Color,
+    border: BorderStroke,
+    elevation: Dp,
+    tint: Color,
+    tintAlpha: () -> Float,
+    modifier: Modifier = Modifier,
+    content: @Composable (pageColor: Color) -> Unit,
+) {
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = color,
+        border = border,
+        shadowElevation = elevation,
+    ) {
+        Box {
+            content(color)
+            Box(
+                modifier =
+                    Modifier
+                        .matchParentSize()
+                        .graphicsLayer { alpha = tintAlpha() }
+                        .background(tint),
+            )
+        }
+    }
+}
+
+/**
  * The well that swallows the card: a soft bloom of the rating colour with rings that contract toward
  * the corner as the card approaches.
  *
@@ -545,6 +653,7 @@ fun DraggableFlashcard(
 private fun BoxScope.CornerBloom(
     corner: GradeCorner,
     color: Color,
+    idleAlpha: Float,
     glow: () -> Float,
     fade: () -> Float,
 ) {
@@ -566,7 +675,7 @@ private fun BoxScope.CornerBloom(
             drawRect(
                 brush =
                     Brush.radialGradient(
-                        colors = listOf(color.copy(alpha = (0.05f + 0.34f * p) * visibility), Color.Transparent),
+                        colors = listOf(color.copy(alpha = (idleAlpha + 0.3f * p) * visibility), Color.Transparent),
                         center = focus,
                         radius = size.minDimension,
                     ),
