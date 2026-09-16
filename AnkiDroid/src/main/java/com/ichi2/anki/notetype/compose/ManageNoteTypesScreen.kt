@@ -75,6 +75,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -126,7 +127,13 @@ fun ManageNoteTypesScreen(
         widthSizeClass == WindowWidthSizeClass.Expanded || widthSizeClass == WindowWidthSizeClass.Medium
 
     var isSearchOpen by remember { mutableStateOf(false) }
-    var selectedNoteType by remember { mutableStateOf<ManageNoteTypeUiModel?>(null) }
+    // saveable because the sheet state is: rememberBottomSheetState saves where the sheet sits. if a
+    // recreation with the sheet open (dark mode, font scale, unfolding, process death) dropped only
+    // this flag, that saved "expanded" would wait unread until the next open picked it up and
+    // skipped the slide-in. keeping the flag brings the sheet back open, which reads it where it
+    // belongs. an id, not the model, so it fits in the saved state
+    var selectedNoteTypeId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val selectedNoteType = selectedNoteTypeId?.let { id -> uiState.noteTypes.firstOrNull { it.id == id } }
 
     // declared here, not in the top bar, so the multi-select handler below stays newer and still
     // wins when both are active. the top bar reads the value lazily, so this scope does not
@@ -141,7 +148,6 @@ fun ManageNoteTypesScreen(
         onDeselectAll()
     }
 
-    val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden)
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     var noteTypeToRename by remember { mutableStateOf<ManageNoteTypeUiModel?>(null) }
@@ -199,7 +205,7 @@ fun ManageNoteTypesScreen(
                         if (uiState.isInMultiSelectMode) {
                             onToggleSelection(noteType.id)
                         } else {
-                            selectedNoteType = noteType
+                            selectedNoteTypeId = noteType.id
                         }
                     },
                     onNoteTypeLongClick = { noteType ->
@@ -212,16 +218,22 @@ fun ManageNoteTypesScreen(
 
             if (!uiState.isInMultiSelectMode) {
                 selectedNoteType?.let { noteType ->
+                    // the sheet state lives and dies with the sheet. every action button closes the
+                    // sheet by dropping it from composition, which never animates the state back to
+                    // hidden, so a state hoisted above this block would still read expanded on the
+                    // next open - and material3 skips the show animation when the state it enters
+                    // with is not hidden, making that open appear instantly
+                    val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden)
                     NoteTypeActionBottomSheet(
                         noteType = noteType,
                         sheetState = sheetState,
-                        onDismissRequest = { selectedNoteType = null },
+                        onDismissRequest = { selectedNoteTypeId = null },
                         onShowFields = { onShowFields(noteType) },
                         onEditCards = { onEditCards(noteType) },
                         onRename = { noteTypeToRename = noteType },
                         onDelete = {
                             onDeleteRequest(noteType)
-                            selectedNoteType = null
+                            selectedNoteTypeId = null
                         })
                 }
             }
