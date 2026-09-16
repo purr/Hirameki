@@ -348,6 +348,8 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
             tempNoteType = CardTemplateNotetype(col.notetypes.get(noteTypeId)!!.deepClone())
             // Timber.d("onCollectionLoaded() model is %s", mTempModel.getModel().toString(2));
         }
+        // edits restored from savedInstanceState must still ask before being discarded
+        updateDiscardChangesCallback()
         fieldNames = tempNoteType!!.notetype.fieldsNames
         // Set up the ViewPager with the sections adapter.
         viewPager.adapter = TemplatePagerAdapter(this@CardTemplateEditor)
@@ -376,6 +378,15 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
     fun noteTypeHasChanged(): Boolean {
         val oldNoteType: NotetypeJson? = getColUnsafe.notetypes.get(noteTypeId)
         return tempNoteType != null && tempNoteType!!.notetype.toString() != oldNoteType.toString()
+    }
+
+    /**
+     * back asks before discarding only while [tempNoteType] differs from the saved note type; with
+     * the callback disabled the system closes the screen with the predictive back animation.
+     * isEnabled must be current before a gesture starts, so call this after every edit of [tempNoteType]
+     */
+    fun updateDiscardChangesCallback() {
+        displayDiscardChangesCallback.isEnabled = noteTypeHasChanged()
     }
 
     private fun showDiscardChangesDialog() = DiscardChangesDialog.showDialog(this) {
@@ -424,6 +435,8 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
             template.jsonObject.put("did", deck.deckId)
             getString(R.string.model_manager_deck_override_added_message, templateName, deck.name)
         }
+        // not a text edit, so the text watcher does not refresh the back callback
+        updateDiscardChangesCallback()
 
         showSnackbar(message, Snackbar.LENGTH_SHORT)
 
@@ -700,7 +713,7 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
                     }
                     refreshFragmentRunnable = updateRunnable
                     refreshFragmentHandler.postDelayed(updateRunnable, REFRESH_PREVIEW_DELAY)
-                    templateEditor.displayDiscardChangesCallback.isEnabled = noteTypeHasChanged()
+                    templateEditor.updateDiscardChangesCallback()
                 }
 
                 override fun beforeTextChanged(
@@ -826,6 +839,8 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
                 prefill = template.name,
             ) { newName ->
                 template.name = newName
+                // not a text edit, so the text watcher does not refresh the back callback
+                templateEditor.updateDiscardChangesCallback()
                 Timber.i("updated card template name")
                 Timber.d("updated name of template %d to '%s'", ordinal, newName)
 
@@ -1378,6 +1393,8 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
             val currentTemplate = getCurrentTemplate()
             if (currentTemplate != null) {
                 result.applyTo(currentTemplate)
+                // not a text edit, so the text watcher does not refresh the back callback
+                templateEditor.updateDiscardChangesCallback()
             }
         }
 
@@ -1500,6 +1517,9 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
                 newTemplates.length() - 1,
                 templateEditor.animationDisabled()
             )
+            // not a text edit, and the rebuilt fragments set their text before attaching the
+            // watcher, so nothing else refreshes the back callback
+            templateEditor.updateDiscardChangesCallback()
         }
 
         /**
@@ -1529,6 +1549,9 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
                 templates.length() - 1,
                 templateEditor.animationDisabled()
             )
+            // not a text edit, and the rebuilt fragments set their text before attaching the
+            // watcher, so nothing else refreshes the back callback
+            templateEditor.updateDiscardChangesCallback()
         }
 
         /**

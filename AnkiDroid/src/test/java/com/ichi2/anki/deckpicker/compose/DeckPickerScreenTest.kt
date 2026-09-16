@@ -15,11 +15,22 @@
  */
 package com.ichi2.anki.deckpicker.compose
 
+import androidx.activity.OnBackPressedDispatcher
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.material3.DrawerState
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasStateDescription
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithText
@@ -41,6 +52,8 @@ import com.ichi2.anki.libanki.sched.DeckNode
 import com.ichi2.anki.ui.compose.components.ADD_DECK_FAB_TAG
 import com.ichi2.anki.ui.compose.components.GET_SHARED_FAB_TAG
 import com.ichi2.anki.ui.compose.theme.AnkiDroidTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -53,6 +66,12 @@ class DeckPickerScreenTest : RobolectricTest() {
 
     @get:Rule
     val composeTestRule = createComposeRule()
+
+    /** the host activity's dispatcher, captured by [setDeckPickerContent] */
+    private lateinit var backDispatcher: OnBackPressedDispatcher
+
+    /** a scope from the composition, captured by [setDeckPickerContent]; drawer animations need its frame clock */
+    private lateinit var compositionScope: CoroutineScope
 
     @Test
     fun searchOpenInputAndCloseRoutesQueryChanges() {
@@ -72,6 +91,110 @@ class DeckPickerScreenTest : RobolectricTest() {
         composeTestRule.onNodeWithContentDescription(closeLabel).performClick()
 
         assertEquals(listOf("spanish", ""), queryEvents)
+    }
+
+    @Test
+    fun backClosesTheOpenSearch() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val searchDecksLabel = context.getString(R.string.search_decks)
+        val queryEvents = mutableListOf<String>()
+
+        setDeckPickerContent(onSearchQueryChanged = { queryEvents += it })
+
+        composeTestRule.onNodeWithContentDescription(searchDecksLabel).performClick()
+        composeTestRule.onNodeWithText(searchDecksLabel).performTextInput("spanish")
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+
+        composeTestRule.onNodeWithTag("search_field").assertDoesNotExist()
+        assertEquals("back clears the query and closes search", listOf("spanish", ""), queryEvents)
+    }
+
+    @Test
+    fun backClosesTheDrawerBeforeTheSearchBehindIt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val searchDecksLabel = context.getString(R.string.search_decks)
+        val queryEvents = mutableListOf<String>()
+        val drawerState = DrawerState(DrawerValue.Closed)
+
+        setDeckPickerContent(onSearchQueryChanged = { queryEvents += it }, drawerState = drawerState)
+
+        composeTestRule.onNodeWithContentDescription(searchDecksLabel).performClick()
+        composeTestRule.onNodeWithText(searchDecksLabel).performTextInput("spanish")
+        // the menu button is hidden while searching, but on a phone the drawer can still be dragged open
+        composeTestRule.runOnIdle { compositionScope.launch { drawerState.open() } }
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+
+        assertEquals("back closes the drawer on top", DrawerValue.Closed, drawerState.currentValue)
+        composeTestRule.onNodeWithTag("search_field").assertExists()
+        assertEquals("the search behind the drawer keeps its query", listOf("spanish"), queryEvents)
+
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.onNodeWithTag("search_field").assertDoesNotExist()
+    }
+
+    @Test
+    fun backClosesTheFabMenuBeforeTheSearchBehindIt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val searchDecksLabel = context.getString(R.string.search_decks)
+        val fabMenuToggleLabel = context.getString(R.string.fab_menu_toggle)
+        val queryEvents = mutableListOf<String>()
+
+        setDeckPickerContent(onSearchQueryChanged = { queryEvents += it })
+
+        composeTestRule.onNodeWithContentDescription(searchDecksLabel).performClick()
+        composeTestRule.onNodeWithText(searchDecksLabel).performTextInput("spanish")
+        // the fab sits over the scaffold, so the menu still opens while the search bar is up
+        composeTestRule.onNodeWithContentDescription(fabMenuToggleLabel).performClick()
+        composeTestRule.waitForIdle()
+        assertFabMenu(expanded = true)
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+
+        assertFabMenu(expanded = false)
+        composeTestRule.onNodeWithTag("search_field").assertExists()
+        assertEquals("the search behind the menu keeps its query", listOf("spanish"), queryEvents)
+
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("search_field").assertDoesNotExist()
+    }
+
+    @Test
+    fun backClosesTheDrawerBeforeTheFabMenuBehindIt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val fabMenuToggleLabel = context.getString(R.string.fab_menu_toggle)
+        val drawerState = DrawerState(DrawerValue.Closed)
+
+        setDeckPickerContent(drawerState = drawerState)
+
+        composeTestRule.onNodeWithContentDescription(fabMenuToggleLabel).performClick()
+        composeTestRule.waitForIdle()
+        // the drawer's drag modifier sits on an ancestor of the fab scrim, so it can still be pulled open
+        composeTestRule.runOnIdle { compositionScope.launch { drawerState.open() } }
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+
+        assertEquals("back closes the drawer on top", DrawerValue.Closed, drawerState.currentValue)
+        assertFabMenu(expanded = true)
+
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+        assertFabMenu(expanded = false)
+    }
+
+    /**
+     * the menu items stay composed at zero size while the menu is closed, so whether it is open is
+     * read from the toggle's state description rather than from the items' presence
+     */
+    private fun assertFabMenu(expanded: Boolean) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val state = context.getString(if (expanded) R.string.fab_menu_expanded else R.string.fab_menu_collapsed)
+        composeTestRule
+            .onNodeWithContentDescription(context.getString(R.string.fab_menu_toggle))
+            .assert(hasStateDescription(state))
     }
 
     @Test
@@ -494,12 +617,14 @@ class DeckPickerScreenTest : RobolectricTest() {
         onNavigationIconClick: () -> Unit = {},
         searchQuery: String = "",
         onSearchQueryChanged: (String) -> Unit = {},
-        isInInitialState: Boolean = decks.isEmpty()
+        isInInitialState: Boolean = decks.isEmpty(),
+        drawerState: DrawerState? = null,
     ) {
         composeTestRule.setContent {
+            backDispatcher = checkNotNull(LocalOnBackPressedDispatcherOwner.current).onBackPressedDispatcher
+            compositionScope = rememberCoroutineScope()
             var currentSearchQuery by remember { mutableStateOf(searchQuery) }
-
-            AnkiDroidTheme {
+            val screen: @Composable (isDrawerOpen: Boolean) -> Unit = { isDrawerOpen ->
                 DeckPickerScreen(
                     fragmented = false,
                     decks = decks,
@@ -521,7 +646,22 @@ class DeckPickerScreenTest : RobolectricTest() {
                     onSearchFocusRequested = {},
                     syncState = SyncIconState.Normal,
                     isInInitialState = isInInitialState,
+                    isDrawerOpen = isDrawerOpen,
                 )
+            }
+
+            AnkiDroidTheme {
+                if (drawerState == null) {
+                    screen(false)
+                } else {
+                    // the drawer the deck picker host wraps the screen in, so its own back handler takes part
+                    ModalNavigationDrawer(
+                        drawerState = drawerState,
+                        drawerContent = { ModalDrawerSheet(drawerState = drawerState) { Text("drawer") } },
+                    ) {
+                        screen(drawerState.targetValue == DrawerValue.Open)
+                    }
+                }
             }
         }
     }

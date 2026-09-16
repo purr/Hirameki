@@ -22,7 +22,6 @@ package com.ichi2.anki.notetype.compose
 
 import android.app.Activity
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,7 +55,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.motionScheme
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -94,6 +92,7 @@ import com.ichi2.anki.R
 import com.ichi2.anki.notetype.ManageNoteTypeUiModel
 import com.ichi2.anki.notetype.ManageNoteTypesUiState
 import com.ichi2.anki.ui.compose.components.AnkiSearchBar
+import com.ichi2.anki.ui.compose.components.predictiveBackSearchAnim
 import com.ichi2.anki.ui.compose.theme.AnkiDroidTheme
 
 @OptIn(
@@ -129,7 +128,10 @@ fun ManageNoteTypesScreen(
     var isSearchOpen by remember { mutableStateOf(false) }
     var selectedNoteType by remember { mutableStateOf<ManageNoteTypeUiModel?>(null) }
 
-    BackHandler(isSearchOpen) {
+    // declared here, not in the top bar, so the multi-select handler below stays newer and still
+    // wins when both are active. the top bar reads the value lazily, so this scope does not
+    // recompose every animation frame
+    val searchAnim by predictiveBackSearchAnim(isSearchOpen) {
         onSearch("")
         isSearchOpen = false
     }
@@ -152,6 +154,7 @@ fun ManageNoteTypesScreen(
                 ManageNoteTypesTopAppBar(
                     searchQuery = uiState.searchQuery,
                     isSearchOpen = isSearchOpen,
+                    searchAnim = { searchAnim },
                     onSearchOpenChange = { isSearchOpen = it },
                     onSearchQueryChange = onSearch,
                     onNavigateUp = onNavigateUp,
@@ -327,6 +330,7 @@ fun NoteTypeSelectionToolbar(
 fun ManageNoteTypesTopAppBar(
     searchQuery: String,
     isSearchOpen: Boolean,
+    searchAnim: () -> Float,
     onSearchOpenChange: (Boolean) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onNavigateUp: () -> Unit,
@@ -334,11 +338,6 @@ fun ManageNoteTypesTopAppBar(
     modifier: Modifier = Modifier,
 ) {
     val searchFocusRequester = remember { FocusRequester() }
-    val searchAnim by animateFloatAsState(
-        targetValue = if (isSearchOpen) 1f else 0f,
-        animationSpec = motionScheme.defaultEffectsSpec(),
-        label = "searchAnim"
-    )
 
     LargeFlexibleTopAppBar(
         modifier = modifier, title = {
@@ -347,7 +346,7 @@ fun ManageNoteTypesTopAppBar(
                 stringResource(R.string.model_browser_label),
                 style = MaterialTheme.typography.displayMediumEmphasized,
                 modifier = Modifier.graphicsLayer {
-                    alpha = 1f - searchAnim
+                    alpha = 1f - searchAnim()
                 })
         }
     }, navigationIcon = {
@@ -374,7 +373,7 @@ fun ManageNoteTypesTopAppBar(
                 onActiveChange = onSearchOpenChange,
                 placeholder = stringResource(R.string.card_browser_search_hint),
                 focusRequester = searchFocusRequester,
-                searchAnim = searchAnim,
+                searchAnim = searchAnim(),
                 modifier = Modifier
                     .weight(1f)
                     .padding(start = 16.dp, end = 12.dp),
