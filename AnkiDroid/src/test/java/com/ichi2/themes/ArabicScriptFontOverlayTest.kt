@@ -71,8 +71,7 @@ class ArabicScriptFontOverlayTest {
 
     @Test
     fun `bottom navigation labels are drawn in vazirmatn`() {
-        // material 1.14 takes itemTextAppearanceActive/Inactive from textAppearanceLabelMedium, not from the
-        // TitleSmall/LabelLarge that ThemeOverlay.App.BottomNavigationView pins
+        // material 1.14 takes itemTextAppearanceActive/Inactive from textAppearanceLabelMedium
         assertFontFamily(com.google.android.material.R.attr.textAppearanceLabelMedium)
     }
 

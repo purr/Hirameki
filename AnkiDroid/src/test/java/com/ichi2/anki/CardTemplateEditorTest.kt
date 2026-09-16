@@ -22,6 +22,8 @@ import android.content.Intent
 import android.os.Bundle
 import android.widget.EditText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.shape.MaterialShapeDrawable
 import com.ichi2.anki.CardTemplateEditor.CardTemplateFragment.CardTemplate
 import com.ichi2.anki.CollectionManager.withCol
 import com.ichi2.anki.libanki.NotetypeJson
@@ -29,6 +31,7 @@ import com.ichi2.anki.libanki.testutils.ext.addNote
 import com.ichi2.anki.model.SelectableDeck
 import com.ichi2.anki.previewer.CardViewerActivity
 import com.ichi2.testutils.assertFalse
+import com.ichi2.themes.Themes
 import org.hamcrest.MatcherAssert
 import org.hamcrest.Matchers
 import org.json.JSONObject
@@ -37,6 +40,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowActivity
 import timber.log.Timber
 import kotlin.test.junit5.JUnit5Asserter.assertEquals
@@ -776,6 +780,76 @@ class CardTemplateEditorTest : RobolectricTest() {
         // check if current view is changed or not
         assumeThat(templateEditText.text.toString(), Matchers.equalTo(tempNoteType.css))
         assumeThat(cardTemplateFragment.currentEditorViewId, Matchers.equalTo(R.id.styling_edit))
+    }
+
+    @Test
+    fun `bottom navigation takes the app's navigation bar colours in light mode`() {
+        assertBottomNavigationFollowsTheme(expectNightMode = false)
+    }
+
+    @Test
+    @Config(qualifiers = "night")
+    fun `bottom navigation takes the app's navigation bar colours in dark mode`() {
+        assertBottomNavigationFollowsTheme(expectNightMode = true)
+    }
+
+    private fun assertBottomNavigationFollowsTheme(expectNightMode: Boolean) {
+        // the bar used to paint itself alternativeBackgroundColor and remap material's navigation bar roles to the
+        // tab layout attributes, which are meant for tabs inside the primary-coloured app bar: the selected pill came
+        // out primary in light mode and colorSurface in dark mode, with primary labels. it has to resolve material's
+        // own roles from the activity theme, which is what carries the app's material you palette into the bar.
+        // the expected colours come from the activity, not the bar's context, so an overlay on the bar that remaps a
+        // role would change only the actual side and fail here
+        val intent = Intent(Intent.ACTION_VIEW)
+        intent.putExtra("noteTypeId", getCurrentDatabaseNoteTypeCopy("Basic").id)
+        val templateEditorController =
+            Robolectric
+                .buildActivity(CardTemplateEditor::class.java, intent)
+                .create()
+                .start()
+                .resume()
+                .visible()
+        saveControllerForCleanup(templateEditorController)
+        advanceRobolectricLooper()
+        val activity = templateEditorController.get()
+        assertEquals("app theme follows the system night mode", expectNightMode, Themes.currentTheme.isNightMode)
+        val bottomNavigation = activity.currentFragment!!.bottomNavigation
+
+        fun themeColor(attr: Int) = MaterialColors.getColor(activity, attr, "CardTemplateEditorTest")
+        val selected = intArrayOf(android.R.attr.state_checked, android.R.attr.state_enabled)
+        val unselected = intArrayOf(android.R.attr.state_enabled)
+
+        assertEquals(
+            "bar surface",
+            themeColor(com.google.android.material.R.attr.colorSurfaceContainer),
+            (bottomNavigation.background as MaterialShapeDrawable).fillColor?.defaultColor,
+        )
+        assertEquals(
+            "selected item indicator",
+            themeColor(com.google.android.material.R.attr.colorSecondaryContainer),
+            bottomNavigation.itemActiveIndicatorColor?.defaultColor,
+        )
+        assertEquals(
+            "selected icon",
+            themeColor(com.google.android.material.R.attr.colorOnSecondaryContainer),
+            bottomNavigation.itemIconTintList?.getColorForState(selected, 0),
+        )
+        assertEquals(
+            "unselected icon",
+            themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant),
+            bottomNavigation.itemIconTintList?.getColorForState(unselected, 0),
+        )
+        assertEquals(
+            "selected label",
+            themeColor(com.google.android.material.R.attr.colorOnSurface),
+            bottomNavigation.itemTextColor?.getColorForState(selected, 0),
+        )
+        assertEquals(
+            "unselected label",
+            themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant),
+            bottomNavigation.itemTextColor?.getColorForState(unselected, 0),
+        )
+        assertEquals("flat, no shadow", 0f, bottomNavigation.elevation)
     }
 
     private fun addCardType(

@@ -632,6 +632,10 @@ open class CardTemplateEditor : AnkiActivity(), DeckSelectionListener {
                         R.attr.alternativeBackgroundColor
                     )
                 )
+                // the bottom navigation deliberately keeps material's colorSurfaceContainer rather than this pane
+                // colour, so it reads as a band next to the previewer's 80dp show answer row (the heights still line
+                // up). its selected pill is colorSecondaryContainer, the same tone as alternativeBackgroundColor
+                // (colorSurfaceVariant: tone 90 light, 30 dark), so on the pane colour the selection would vanish
 
                 // Create a MaterialCardView to wrap the editorEditText
                 val cardView = MaterialCardView(requireContext()).apply {
