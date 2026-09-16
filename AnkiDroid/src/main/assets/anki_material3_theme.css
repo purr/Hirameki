@@ -584,8 +584,15 @@ body:has(.deck-options-page) .sticky-container .select-container .chevron {
     margin-bottom: 8px;
 }
 
-/* easy days: no rule under every cell, and the app's m3 slider (16px track, 4x44px handle)
-   with a stop mark at "reduced". appearance:none drops the native parts, so both are drawn */
+/* easy days: upstream's three 1fr columns cannot shrink below their longest word, so a
+   translated column header widened the grid past the card, where the page's overflow-x cut
+   it off */
+.deck-options-page .row-columns .dynamically-slottable .easy-days-settings {
+    grid-template-columns: auto repeat(3, minmax(0, 1fr));
+}
+
+/* no rule under every cell, and the app's m3 slider (16px track, 4x44px handle) with a stop
+   mark at "reduced". appearance:none drops the native parts, so both are drawn */
 .deck-options-page .row-columns .dynamically-slottable .easy-days-settings > * {
     padding: 4px 8px;
     border-bottom: 0;
@@ -740,7 +747,11 @@ body:has(.deck-options-page) .popover {
 body:has(.deck-options-page) .popover button.dropdown-item {
     align-items: center;
     min-height: 48px;
-    padding: 0 16px;
+    padding: 8px 16px;
+    /* upstream keeps menu rows on one line, so a long preset name ran out of the menu and off
+       the screen edge. m3 menu rows wrap instead */
+    overflow-wrap: break-word;
+    white-space: normal;
     border: 0;
     border-radius: 20px;
     background: transparent;
@@ -925,6 +936,8 @@ body:has(.deck-options-page) .modal-header .chapter-redirect {
 
 body:has(.deck-options-page) .carousel-item > .row {
     color: var(--m3-on-surface-variant);
+    /* help text carries urls and file paths; unbroken, they reach past the dialog */
+    overflow-wrap: break-word;
     font-size: 16px;
     line-height: 24px;
 }
@@ -975,8 +988,9 @@ body:has(.deck-options-page) #nav button.active {
     color: var(--m3-on-secondary-container);
 }
 
-/* narrow dialogs: upstream stacked a 250px-wide chapter list above the text; a scrolling row of
-   chips keeps the text in view */
+/* narrow dialogs: upstream stacked a 250px-wide chapter list above the text. the chapters are
+   chips that wrap onto as many lines as they need, so every chapter of the card stays in view
+   and nothing scrolls sideways */
 @media (max-width: 991.98px) {
     body:has(.deck-options-page) .modal.fade .modal-body > svelte-css-wrapper > .row > svelte-css-wrapper > .col {
         flex-basis: 100%;
@@ -984,35 +998,148 @@ body:has(.deck-options-page) #nav button.active {
 
     body:has(.deck-options-page) .modal-body nav {
         flex: 1 1 auto;
-        min-width: 0; /* lets the chip row scroll instead of widening the dialog */
+        min-width: 0; /* lets the chips wrap instead of widening the dialog */
     }
 
     body:has(.deck-options-page) #nav ul {
         display: flex;
-        overflow-x: auto;
-    }
-
-    body:has(.deck-options-page) #nav ul::-webkit-scrollbar {
-        display: none; /* upstream's 12px custom scrollbar */
+        flex-wrap: wrap;
+        gap: 8px;
     }
 
     body:has(.deck-options-page) #nav li {
         flex: none;
+        max-width: 100%; /* a long chapter title wraps inside its chip, it does not stick out */
+    }
+
+    /* a chapter that does not apply to the current scheduler is hidden with .d-none, which anki
+       puts on the button, not on its li. the li then survives as a 0x0 flex item and still takes
+       a gap on either side, and the advanced card hides five chapters in a row: a 48px hole in
+       the middle of the row. the li goes with its button, so only real chips are spaced */
+    body:has(.deck-options-page) #nav li:has(> button.d-none) {
+        display: none;
     }
 
     body:has(.deck-options-page) #nav button {
         width: auto;
         min-height: 32px;
-        margin-inline-end: 8px; /* a margin, not a gap: hidden (.d-none) chips leave no space */
-        padding: 0 12px;
+        padding: 4px 12px;
         border: 1px solid var(--m3-outline-variant);
         border-radius: 8px;
-        white-space: nowrap;
     }
 
     body:has(.deck-options-page) #nav button.active {
         border-color: transparent;
     }
+}
+
+/* motion
+ *
+ * bootstrap drives these dialogs from javascript and reads how long to wait out of one
+ * element's computed style per step: the first comma-separated transition-duration plus
+ * transition-delay, and 5ms of padding (Cfg-5ksk.js:177). the element it measures is
+ *   opening   the backdrop, after .show is added, and then the .modal-dialog, after .show
+ *   closing   the .modal, after .show is removed, and then the backdrop again
+ * upstream therefore spent 150ms fading the scrim before a 300ms 50px slide even started. an
+ * m3 dialog is a fade with a small scale, so the scrim holds a 0s transition while it opens,
+ * which lets the dialog start in the same frame, and a keyframe animation fades it alongside.
+ * so every duration here doubles as bootstrap's wait, while the animations stay invisible to
+ * that measurement, which is what the scrim and the .fade-less simulator lean on
+ */
+@keyframes m3-scrim-in {
+    from {
+        opacity: 0;
+    }
+}
+
+/* dialogs and menus enter the same way, on their own duration and easing */
+@keyframes m3-scale-in {
+    from {
+        opacity: 0;
+        transform: scale(0.92);
+    }
+}
+
+@keyframes m3-help-page-in {
+    from {
+        opacity: 0;
+    }
+}
+
+body:has(.deck-options-page) .modal-backdrop.show {
+    animation: m3-scrim-in 200ms linear;
+}
+
+body:has(.deck-options-page) .modal-backdrop.fade {
+    transition: opacity 120ms linear; /* measured while closing, once .show is gone */
+}
+
+body:has(.deck-options-page) .modal-backdrop.fade.show {
+    transition-duration: 0s; /* measured while opening: the dialog follows in the same frame */
+}
+
+/* the .modal carries the fade, and with it the closing wait; the dialog carries the scale */
+body:has(.deck-options-page) .modal.fade {
+    transition: opacity 120ms linear;
+}
+
+body:has(.deck-options-page) .modal.fade .modal-dialog {
+    transition: transform 200ms cubic-bezier(0.05, 0.7, 0.1, 1); /* m3 emphasized decelerate */
+}
+
+/* the closed state: where an opening dialog starts and where a closing one ends. it is scoped
+   to :not(.show) so that bootstrap's own `.modal.show .modal-dialog { transform: none }` still
+   lands the open dialog, which it could not if this rule reached the shown state as well */
+body:has(.deck-options-page) .modal.fade:not(.show) .modal-dialog {
+    transform: scale(0.92);
+    transition-duration: 120ms;
+    transition-timing-function: cubic-bezier(0.3, 0, 0.8, 0.15); /* m3 emphasized accelerate */
+}
+
+/* the simulator carries no .fade, so bootstrap animates none of it and only adds .show */
+body:has(.deck-options-page) .modal:not(.fade).show .modal-dialog {
+    animation: m3-scale-in 200ms cubic-bezier(0.05, 0.7, 0.1, 1);
+}
+
+/* menus: the popover mounts as .hidden and floating-ui drops the class once it has placed it,
+   so the animation runs anchored. closing unmounts the node, which no css can animate */
+body:has(.deck-options-page) .popover:not(.hidden) {
+    transform-origin: top center;
+    animation: m3-scale-in 150ms cubic-bezier(0.05, 0.7, 0.1, 1);
+}
+
+body:has(.deck-options-page) .popover.top:not(.hidden) {
+    transform-origin: bottom center;
+}
+
+body:has(.deck-options-page) .popover.left:not(.hidden) {
+    transform-origin: center right;
+}
+
+body:has(.deck-options-page) .popover.right:not(.hidden) {
+    transform-origin: center left;
+}
+
+/* help chapters: upstream slides the pages sideways, because anki hands .carousel-item
+   `transition: var(--transition)`, which is every property, transform included, over 180ms.
+   with no transition bootstrap's wait drops to its 5ms floor: the page swaps at once, in
+   place, and fades in */
+body:has(.deck-options-page) .carousel-item {
+    transform: none;
+    transition: none;
+}
+
+/* both pages of a swap carry -start or -end while it runs, and both are held invisible. the
+   outgoing one would otherwise draw over the incoming one for a frame, and the incoming one is
+   already display:block a task before bootstrap adds .active: it would paint at full opacity in
+   that gap and the fade would then restart it from 0, which reads as a blink */
+body:has(.deck-options-page) .carousel-item-start,
+body:has(.deck-options-page) .carousel-item-end {
+    opacity: 0;
+}
+
+body:has(.deck-options-page) .carousel-item.active {
+    animation: m3-help-page-in 150ms cubic-bezier(0.05, 0.7, 0.1, 1);
 }
 
 /* state layers: 8% of the content colour on hover, 10% pressed. hover only with a real pointer,
@@ -1067,5 +1194,22 @@ body:has(.deck-options-page) #nav button:focus-visible {
 @media (prefers-reduced-motion: reduce) {
     .deck-options-page .row-columns .dynamically-slottable .form-switch .form-check-input {
         transition: none;
+    }
+
+    /* the motion rules outrank bootstrap's own reduced-motion rules, so each one stands itself
+       down here. dropping a transition only shortens bootstrap's wait to the 5ms floor, it
+       never strands a dialog: the callback that finishes opening or closing still runs */
+    body:has(.deck-options-page) .modal-backdrop.fade,
+    body:has(.deck-options-page) .modal.fade,
+    body:has(.deck-options-page) .modal.fade .modal-dialog,
+    body:has(.deck-options-page) .modal.fade:not(.show) .modal-dialog {
+        transition: none;
+    }
+
+    body:has(.deck-options-page) .modal-backdrop.show,
+    body:has(.deck-options-page) .modal:not(.fade).show .modal-dialog,
+    body:has(.deck-options-page) .popover:not(.hidden),
+    body:has(.deck-options-page) .carousel-item.active {
+        animation: none;
     }
 }
