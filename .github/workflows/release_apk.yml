@@ -223,7 +223,8 @@ jobs:
           # cannot be read back. it is missing only when the build ran with MINIFY_ENABLED=false
           mapping=AnkiDroid/build/outputs/mapping/fullRelease/mapping.txt
           if [ -f "$mapping" ]; then
-            cp "$mapping" "dist/Hirameki-$VERSION-mapping.txt"
+            # gzipped: the raw file is larger than every apk together, and r8's retrace reads it compressed
+            gzip -9 -c "$mapping" > "dist/Hirameki-$VERSION-mapping.txt.gz"
           else
             echo "::warning::no r8 mapping at $mapping: crash traces from these apks cannot be deobfuscated"
           fi
@@ -247,9 +248,9 @@ jobs:
             esac
             assets+=("$apk#$label")
           done
-          mapping=dist/Hirameki-$VERSION-mapping.txt
+          mapping=dist/Hirameki-$VERSION-mapping.txt.gz
           if [ -f "$mapping" ]; then
-            assets+=("$mapping#R8 mapping file (turns a crash trace from these APKs back into readable names)")
+            assets+=("$mapping#R8 mapping file, gzipped (turns a crash trace from these APKs back into readable names)")
           fi
 
           cat > "$RUNNER_TEMP/notes.md" <<EOF
