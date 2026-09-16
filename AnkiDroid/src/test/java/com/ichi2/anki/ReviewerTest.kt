@@ -24,6 +24,7 @@ import com.ichi2.anim.ActivityTransitionAnimation
 import com.ichi2.anki.cardviewer.Gesture
 import junit.framework.TestCase.assertEquals
 import org.junit.Test
+import org.junit.jupiter.api.assertDoesNotThrow
 import org.junit.runner.RunWith
 import org.robolectric.Shadows
 
@@ -67,6 +68,19 @@ class ReviewerTest : RobolectricTest() {
             expectedAnimation,
             actualAnimation
         )
+    }
+
+    @Test
+    fun `a dead renderer is handled by a reviewer that has no card frame`() {
+        addBasicNote("Hello", "World")
+        val reviewer = startRegularActivity<Reviewer>()
+        advanceRobolectricLooper()
+
+        // #143: this reviewer draws its card in compose and never runs initLayout(), so it has no card
+        // frame. both of these run from onRenderProcessGone, and webview rethrows anything thrown there as
+        // an app crash, which closed the reviewer and reopened the deck list
+        assertDoesNotThrow { reviewer.destroyWebViewFrame() }
+        assertDoesNotThrow { reviewer.recreateWebViewFrame() }
     }
 
     companion object {

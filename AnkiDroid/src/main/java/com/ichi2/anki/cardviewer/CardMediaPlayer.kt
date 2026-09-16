@@ -128,6 +128,14 @@ class CardMediaPlayer : Closeable {
     var playAvTagsJob: Job? = null
     val isPlaying get() = playAvTagsJob != null
 
+    /**
+     * Suspends until the current playback has finished, been stopped, or failed. [playOne] only
+     * starts playback and returns straight away, so this is the way to learn when it is over.
+     */
+    suspend fun awaitIdle() {
+        playAvTagsJob?.join()
+    }
+
     private var onMediaGroupCompleted: (() -> Unit)? = null
 
     fun setOnMediaGroupCompletedListener(listener: (() -> Unit)?) {
@@ -186,8 +194,13 @@ class CardMediaPlayer : Closeable {
             }
     }
 
-    suspend fun playOne(tag: AvTag) {
-        if (!isEnabled) return
+    /**
+     * Starts [tag] playing and hands back the job playing it, or null when playback is disabled. Join that
+     * job to wait for this playback in particular: [awaitIdle] waits on whatever is current when it is
+     * called, which a later replay or a card change may already have replaced.
+     */
+    suspend fun playOne(tag: AvTag): Job? {
+        if (!isEnabled) return null
 
         suspend fun play(tag: AvTag) = play(tag, isAutomaticPlayback = false)
 
@@ -201,7 +214,7 @@ class CardMediaPlayer : Closeable {
             }
         }
 
-        playAvTagsJob =
+        val job =
             playbackMutex.withLock {
                 playAvTagsJob?.cancelAndJoin()
                 Timber.i("playing one AV Tag")
@@ -223,6 +236,8 @@ class CardMediaPlayer : Closeable {
                     playAvTagsJob = null
                 }
             }
+        playAvTagsJob = job
+        return job
     }
 
     fun stop() {

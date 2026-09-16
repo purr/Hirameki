@@ -40,6 +40,7 @@ import io.mockk.runs
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import org.hamcrest.MatcherAssert.assertThat
+import org.hamcrest.Matchers.equalTo
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -241,6 +242,27 @@ class CardMediaPlayerTest : JvmTest() {
         coVerify(exactly = 1) { tagPlayer.play(SoundOrVideoTag("video.mp4"), any()) }
         ensureOnMediaGroupCompletedCalled()
     }
+
+    @Test
+    fun `playOne hands back the job for that playback alone`() =
+        runSoundPlayerTest {
+            val firstPlaying = CompletableDeferred<Unit>()
+            val secondPlaying = CompletableDeferred<Unit>()
+            coEvery { tagPlayer.play(SoundOrVideoTag("a.mp3"), any()) } coAnswers { firstPlaying.await() }
+            coEvery { tagPlayer.play(SoundOrVideoTag("b.mp3"), any()) } coAnswers { secondPlaying.await() }
+
+            val first = requireNotNull(playOne(SoundOrVideoTag("a.mp3")))
+            val second = requireNotNull(playOne(SoundOrVideoTag("b.mp3")))
+
+            // the second replay cancelled the first, so the first tap's own wait is over. awaitIdle() waits
+            // on whatever is playing when it is called, which here is the playback that replaced this one
+            first.join()
+            assertThat("the replaced playback is over", first.isCompleted, equalTo(true))
+            assertThat("the one that replaced it plays on", second.isCompleted, equalTo(false))
+
+            secondPlaying.complete(Unit)
+            second.join()
+        }
 
     private fun verifyNoSoundsPlayed() {
         coVerify(exactly = 0) { tagPlayer.play(any(), any()) }

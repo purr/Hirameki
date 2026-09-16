@@ -17,13 +17,12 @@ package com.ichi2.anki.reviewer.compose
 
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -32,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -58,7 +58,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -79,8 +78,12 @@ private object AnswerButtonsConstants {
     val ToolbarIconHeight = 48.dp
     val MainButtonHeight = 56.dp
     val RatingButtonGroupSpacing = 2.dp
-    val ExpandedButtonHorizontalPadding = 24.dp
-    val PressedAnimationExtraPadding = 4.dp
+
+    /** Room kept between the answer bar and each side of the screen. */
+    val BarEdgeMargin = 28.dp
+
+    /** Widest the answer bar gets, so on a tablet the ratings stay within a thumb's reach of each other. */
+    val BarMaxWidth = 400.dp
     val BadgeBottomPadding = 6.dp
     val AdjustedBadgeBottomPadding = 2.dp
     val AdjustedTextTopPadding = 14.dp
@@ -98,6 +101,15 @@ private val ratings = listOf(
 @Composable
 fun AnswerButtons(
     modifier: Modifier = Modifier,
+    /**
+     * Whether the bar acts on touches. False on a step the card view performs itself: the bar is laid out
+     * there anyway, so the card's room never changes across the reveal, but nothing on a bar drawn away to
+     * nothing may answer a tap the user cannot see they made. Every control honours it, the type-in field
+     * and the overflow button included: the card view serves neither, so those two are only ever composed
+     * with it true today, and they follow the one contract rather than carry a private rule that the next
+     * layout change would quietly break.
+     */
+    enabled: Boolean = true,
     isAnswerShown: Boolean,
     showButtonBadges: Boolean,
     colorizeAnswerButtons: Boolean = false,
@@ -112,52 +124,62 @@ fun AnswerButtons(
 ) {
     val adjustButtonStylesForBadges = showButtonBadges && moreOptionsInTopAppBar
 
-    Column(
-        modifier = modifier.imePadding(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(AnswerButtonsConstants.ColumnSpacing)
-    ) {
-        if (showTypeInAnswer) {
-            AnswerTypeInTextField(
-                typedAnswer = typedAnswer,
-                onTypedAnswerChanged = onTypedAnswerChanged,
-                isAnswerShown = isAnswerShown,
-                onShowAnswer = onShowAnswer
-            )
-        }
+    BoxWithConstraints(modifier = modifier.imePadding()) {
+        // one width for the whole bar, from the screen rather than from the labels: the same before and
+        // after the reveal, so the bar never resizes as the answer appears, and shared evenly by the
+        // ratings, so a short label such as "Good" gets as much room as "Again"
+        val barWidth =
+            (maxWidth - AnswerButtonsConstants.BarEdgeMargin * 2).coerceIn(0.dp, AnswerButtonsConstants.BarMaxWidth)
 
-        HorizontalFloatingToolbar(
-            expanded = true,
-            colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(AnswerButtonsConstants.ColumnSpacing)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (!moreOptionsInTopAppBar) {
-                    IconButton(
-                        onClick = onMoreOptionsClick,
-                        modifier = Modifier.height(AnswerButtonsConstants.ToolbarIconHeight),
-                    ) {
-                        Icon(
-                            Icons.Filled.MoreVert,
-                            contentDescription = stringResource(R.string.more_options)
-                        )
+            if (showTypeInAnswer) {
+                AnswerTypeInTextField(
+                    typedAnswer = typedAnswer,
+                    onTypedAnswerChanged = onTypedAnswerChanged,
+                    isAnswerShown = isAnswerShown,
+                    onShowAnswer = onShowAnswer,
+                    enabled = enabled
+                )
+            }
+
+            HorizontalFloatingToolbar(
+                expanded = true,
+                modifier = Modifier.width(barWidth),
+                colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (!moreOptionsInTopAppBar) {
+                        IconButton(
+                            onClick = onMoreOptionsClick,
+                            enabled = enabled,
+                            modifier = Modifier.height(AnswerButtonsConstants.ToolbarIconHeight),
+                        ) {
+                            Icon(
+                                Icons.Filled.MoreVert,
+                                contentDescription = stringResource(R.string.more_options)
+                            )
+                        }
                     }
-                }
-                Box(
-                    modifier = Modifier.animateContentSize(motionScheme.fastSpatialSpec())
-                ) {
-                    if (!isAnswerShown) {
-                        ShowAnswerButton(
-                            moreOptionsInTopAppBar = moreOptionsInTopAppBar,
-                            onShowAnswer = onShowAnswer
-                        )
-                    } else {
-                        RatingButtons(
-                            showButtonBadges = showButtonBadges,
-                            colorizeAnswerButtons = colorizeAnswerButtons,
-                            adjustButtonStylesForBadges = adjustButtonStylesForBadges,
-                            onRateCard = onRateCard,
-                            nextTimes = nextTimes
-                        )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .animateContentSize(motionScheme.fastSpatialSpec())
+                    ) {
+                        if (!isAnswerShown) {
+                            ShowAnswerButton(onShowAnswer = onShowAnswer, enabled = enabled)
+                        } else {
+                            RatingButtons(
+                                showButtonBadges = showButtonBadges,
+                                colorizeAnswerButtons = colorizeAnswerButtons,
+                                adjustButtonStylesForBadges = adjustButtonStylesForBadges,
+                                onRateCard = onRateCard,
+                                nextTimes = nextTimes,
+                                enabled = enabled
+                            )
+                        }
                     }
                 }
             }
@@ -170,7 +192,8 @@ private fun AnswerTypeInTextField(
     typedAnswer: String,
     onTypedAnswerChanged: (String) -> Unit,
     isAnswerShown: Boolean,
-    onShowAnswer: () -> Unit
+    onShowAnswer: () -> Unit,
+    enabled: Boolean
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -188,6 +211,9 @@ private fun AnswerTypeInTextField(
             ),
         shape = MaterialTheme.shapes.extraLargeIncreased,
         interactionSource = interactionSource,
+        // a covered bar is invisible, and an invisible field that still takes focus would raise the
+        // keyboard over a card the user is only looking at
+        enabled = enabled,
         readOnly = isAnswerShown,
         singleLine = true,
         colors = TextFieldDefaults.colors(
@@ -205,29 +231,21 @@ private fun AnswerTypeInTextField(
 
 @Composable
 private fun ShowAnswerButton(
-    moreOptionsInTopAppBar: Boolean, onShowAnswer: () -> Unit
+    onShowAnswer: () -> Unit,
+    enabled: Boolean
 ) {
     val view = LocalView.current
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val baseHorizontalPadding = ButtonDefaults.MediumContentPadding.calculateLeftPadding(
-        layoutDirection = LocalLayoutDirection.current
-    ) + if (moreOptionsInTopAppBar) AnswerButtonsConstants.ExpandedButtonHorizontalPadding else 0.dp
 
-    val horizontalPadding by animateDpAsState(
-        if (isPressed) baseHorizontalPadding + AnswerButtonsConstants.PressedAnimationExtraPadding else baseHorizontalPadding,
-        motionScheme.fastSpatialSpec(),
-        label = "ShowAnswerButtonPadding"
-    )
-
+    // as wide as the rating buttons it turns into, so the bar keeps its size across the reveal
     Button(
         onClick = {
             view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             onShowAnswer()
         },
-        modifier = Modifier.height(AnswerButtonsConstants.MainButtonHeight),
-        interactionSource = interactionSource,
-        contentPadding = PaddingValues(horizontal = horizontalPadding),
+        enabled = enabled,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(AnswerButtonsConstants.MainButtonHeight),
         colors = ButtonDefaults.buttonColors(
             MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.onPrimary
         )
@@ -247,12 +265,14 @@ private fun RatingButtons(
     colorizeAnswerButtons: Boolean,
     adjustButtonStylesForBadges: Boolean,
     onRateCard: (CardAnswer.Rating) -> Unit,
-    nextTimes: List<String>
+    nextTimes: List<String>,
+    enabled: Boolean
 ) {
     val view = LocalView.current
     val ratingColors = LocalAnkiColors.current.ratings
 
     ButtonGroup(
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(AnswerButtonsConstants.RatingButtonGroupSpacing),
         overflowIndicator = { }) {
         ratings.forEachIndexed { index, (labelResId, rating) ->
@@ -271,6 +291,8 @@ private fun RatingButtons(
 
                     Box(
                         modifier = Modifier
+                            // equal shares of the bar; a press still widens its button for a moment
+                            .weight(1f)
                             .animateWidth(interactionSource)
                             .semantics {
                                 contentDescription = "$labelText, $nextTime"
@@ -281,6 +303,7 @@ private fun RatingButtons(
                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                 onRateCard(rating)
                             },
+                            enabled = enabled,
                             modifier = Modifier
                                 .height(AnswerButtonsConstants.MainButtonHeight)
                                 .fillMaxWidth()
