@@ -23,7 +23,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
-import androidx.activity.OnBackPressedCallback
 import androidx.annotation.XmlRes
 import androidx.core.view.updateLayoutParams
 import androidx.fragment.app.Fragment
@@ -34,6 +33,7 @@ import androidx.fragment.app.commit
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import com.bytehamster.lib.preferencesearch.SearchConfiguration
+import com.bytehamster.lib.preferencesearch.SearchPreferenceFragment
 import com.bytehamster.lib.preferencesearch.SearchPreferenceResult
 import com.bytehamster.lib.preferencesearch.SearchPreferenceResultListener
 import com.google.android.material.appbar.AppBarLayout
@@ -63,24 +63,24 @@ class PreferencesFragment :
      */
     private val settingsIsSplit get() = !resources.isWindowCompact()
 
-    private val childFragmentOnBackPressedCallback =
-        object : OnBackPressedCallback(enabled = false) {
-            override fun handleOnBackPressed() {
-                Timber.i("back pressed - popping child backstack")
-                childFragmentManager.popBackStack()
-            }
-        }
+    /**
+     * whether the settings search is showing. [HeaderFragment.configureSearchBar] hands the activity to
+     * `SearchConfiguration`, which adds a [SearchPreferenceFragment] under its own tag to the activity's
+     * manager with `addToBackStack`, so the overlay is an entry on the back stack above this fragment.
+     *
+     * the overlay is matched by tag, not by back stack depth: `AnkiActivity.showDialogFragment` also puts
+     * entries on that stack, and any of those would otherwise take settings' own predictive back away
+     * with no symptom other than the animation stopping
+     */
+    private val searchIsShowing get() = parentFragmentManager.findFragmentByTag(SearchPreferenceFragment.TAG) != null
 
-    private val childBackStackListener =
-        FragmentManager.OnBackStackChangedListener {
-            childFragmentOnBackPressedCallback.isEnabled = childFragmentManager.backStackEntryCount > 0
-        }
+    private val searchBackStackListener = FragmentManager.OnBackStackChangedListener { updateBackOwnership() }
 
     override fun onViewCreated(
         view: View,
         savedInstanceState: Bundle?,
     ) {
-        setupBackCallbacks()
+        parentFragmentManager.addOnBackStackChangedListener(searchBackStackListener)
 
         // Load initial subscreen if activity is being first created
         if (savedInstanceState == null) {
@@ -90,9 +90,40 @@ class PreferencesFragment :
         setupBigScreenLayout()
     }
 
+    override fun onStart() {
+        super.onStart()
+        // the initial claim, and the retry for anything the listener could not commit while the
+        // activity was stopped: see the state-saved case in [updateBackOwnership]
+        updateBackOwnership()
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
-        childFragmentManager.removeOnBackStackChangedListener(childBackStackListener)
+        parentFragmentManager.removeOnBackStackChangedListener(searchBackStackListener)
+    }
+
+    /**
+     * gives back to whichever fragment manager owns what is actually on top.
+     *
+     * a fragment manager handles back only while its parent fragment is the primary navigation one, so
+     * making this fragment primary hands the sub-screen back stack to [childFragmentManager]. it pops
+     * with the seekable animator transition of [setFadeTransition], so the gesture previews the parent
+     * screen, and an empty child back stack enables no callback at all, so the system closes settings
+     * with the predictive back animation. the hand-written callback that popped the stack before could
+     * do neither: being enabled replaced the system animation, and it never fed the gesture.
+     *
+     * while the search is showing it is drawn over this fragment and is what back must close, so this
+     * fragment drops the role: the activity's manager then pops the search instead of the sub-screen
+     * hidden behind it.
+     */
+    private fun updateBackOwnership() {
+        val owner = if (searchIsShowing) null else this
+        // committing unconditionally would re-enter through the back stack listener
+        if (parentFragmentManager.primaryNavigationFragment === owner) return
+        // a commit after the state was saved would throw. the manager counts as state-saved for as long
+        // as the activity is stopped, so this only defers: [onStart] re-evaluates on the way back
+        if (parentFragmentManager.isStateSaved) return
+        parentFragmentManager.commit { setPrimaryNavigationFragment(owner) }
     }
 
     override fun onPreferenceStartFragment(
@@ -130,6 +161,8 @@ class PreferencesFragment :
 
         parentFragmentManager.popBackStack() // clear the search fragment from the backstack
         childFragmentManager.commit {
+            // as in onPreferenceStartFragment: without it the pop cannot follow a back gesture
+            setReorderingAllowed(true)
             replace(R.id.settings_container, fragment, fragment.javaClass.name)
             setFadeTransition(this)
             addToBackStack(fragment.javaClass.name)
@@ -137,12 +170,6 @@ class PreferencesFragment :
 
         Timber.i("Highlighting key '%s' on %s", result.key, fragment)
         result.highlight(fragment as PreferenceFragmentCompat)
-    }
-
-    private fun setupBackCallbacks() {
-        requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner, childFragmentOnBackPressedCallback)
-        childFragmentManager.addOnBackStackChangedListener(childBackStackListener)
-        childFragmentOnBackPressedCallback.isEnabled = childFragmentManager.backStackEntryCount > 0
     }
 
     private fun setupBigScreenLayout() {

@@ -28,7 +28,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasStateDescription
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithText
@@ -130,6 +132,69 @@ class DeckPickerScreenTest : RobolectricTest() {
 
         composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
         composeTestRule.onNodeWithTag("search_field").assertDoesNotExist()
+    }
+
+    @Test
+    fun backClosesTheFabMenuBeforeTheSearchBehindIt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val searchDecksLabel = context.getString(R.string.search_decks)
+        val fabMenuToggleLabel = context.getString(R.string.fab_menu_toggle)
+        val queryEvents = mutableListOf<String>()
+
+        setDeckPickerContent(onSearchQueryChanged = { queryEvents += it })
+
+        composeTestRule.onNodeWithContentDescription(searchDecksLabel).performClick()
+        composeTestRule.onNodeWithText(searchDecksLabel).performTextInput("spanish")
+        // the fab sits over the scaffold, so the menu still opens while the search bar is up
+        composeTestRule.onNodeWithContentDescription(fabMenuToggleLabel).performClick()
+        composeTestRule.waitForIdle()
+        assertFabMenu(expanded = true)
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+
+        assertFabMenu(expanded = false)
+        composeTestRule.onNodeWithTag("search_field").assertExists()
+        assertEquals("the search behind the menu keeps its query", listOf("spanish"), queryEvents)
+
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("search_field").assertDoesNotExist()
+    }
+
+    @Test
+    fun backClosesTheDrawerBeforeTheFabMenuBehindIt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val fabMenuToggleLabel = context.getString(R.string.fab_menu_toggle)
+        val drawerState = DrawerState(DrawerValue.Closed)
+
+        setDeckPickerContent(drawerState = drawerState)
+
+        composeTestRule.onNodeWithContentDescription(fabMenuToggleLabel).performClick()
+        composeTestRule.waitForIdle()
+        // the drawer's drag modifier sits on an ancestor of the fab scrim, so it can still be pulled open
+        composeTestRule.runOnIdle { compositionScope.launch { drawerState.open() } }
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+
+        assertEquals("back closes the drawer on top", DrawerValue.Closed, drawerState.currentValue)
+        assertFabMenu(expanded = true)
+
+        composeTestRule.runOnIdle { backDispatcher.onBackPressed() }
+        composeTestRule.waitForIdle()
+        assertFabMenu(expanded = false)
+    }
+
+    /**
+     * the menu items stay composed at zero size while the menu is closed, so whether it is open is
+     * read from the toggle's state description rather than from the items' presence
+     */
+    private fun assertFabMenu(expanded: Boolean) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val state = context.getString(if (expanded) R.string.fab_menu_expanded else R.string.fab_menu_collapsed)
+        composeTestRule
+            .onNodeWithContentDescription(context.getString(R.string.fab_menu_toggle))
+            .assert(hasStateDescription(state))
     }
 
     @Test

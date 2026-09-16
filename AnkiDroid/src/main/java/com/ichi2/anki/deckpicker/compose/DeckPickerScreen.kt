@@ -375,7 +375,7 @@ fun DeckPickerContent(
 private fun DeckPickerTopBar(
     isSearchOpen: Boolean,
     onSearchOpenChange: (Boolean) -> Unit,
-    isDrawerOpen: Boolean,
+    searchOwnsBack: Boolean,
     searchQuery: String,
     onSearchQueryChanged: (String) -> Unit,
     isSyncing: Boolean,
@@ -387,9 +387,8 @@ private fun DeckPickerTopBar(
 ) {
     var isMoreOptionsMenuOpen by remember { mutableStateOf(false) }
     val searchFocusRequester = remember { FocusRequester() }
-    // a drawer dragged open over the search owns back: the first back closes the drawer, the next
-    // one the search. without this the search's handler, registered later, closed the hidden search
-    val searchAnim by predictiveBackSearchAnim(isSearchOpen, backEnabled = !isDrawerOpen) {
+    // whatever is drawn over the search owns back first; see [searchOwnsBack]
+    val searchAnim by predictiveBackSearchAnim(isSearchOpen, backEnabled = searchOwnsBack) {
         onSearchQueryChanged("")
         onSearchOpenChange(false)
     }
@@ -575,8 +574,12 @@ fun MoreOptionsMenu(
  * @param fragmented Whether the deck picker is currently using the split tablet layout.
  * @param studyOptionsData The currently selected deck summary for the study options panel.
  * @param requestSearchFocus One-shot flag used by outer navigation state to reopen deck search.
- * @param isDrawerOpen whether the navigation drawer over this screen is open or opening. back then
- * belongs to the drawer, so an open search leaves it alone.
+ * @param isDrawerOpen whether the navigation drawer over this screen is open or opening.
+ *
+ * back goes to whatever is drawn on top: the drawer first, then the fab menu, then the search. each
+ * layer's handler is disabled while a higher one is up, because registration order cannot express
+ * this - the search lives in [Scaffold]'s topBar, which is subcomposed during layout and so
+ * registers last, and the fab is composed after the scaffold.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -635,7 +638,7 @@ fun DeckPickerScreen(
                 DeckPickerTopBar(
                     isSearchOpen = isSearchOpen,
                     onSearchOpenChange = { isSearchOpen = it },
-                    isDrawerOpen = isDrawerOpen,
+                    searchOwnsBack = !isDrawerOpen && !fabMenuExpanded,
                     searchQuery = searchQuery,
                     onSearchQueryChanged = onSearchQueryChanged,
                     isSyncing = isSyncing,
@@ -689,6 +692,7 @@ fun DeckPickerScreen(
             expanded = fabMenuExpanded,
             onExpandedChange = { fabMenuExpanded = it },
             fabActions = fabActions,
+            backEnabled = !isDrawerOpen,
             scrimOpacity = if (fragmented) 0F else 0.5f,
         )
     }
@@ -696,12 +700,16 @@ fun DeckPickerScreen(
 
 /**
  * Hosts the expandable floating action button and its dismiss scrim.
+ *
+ * @param backEnabled false while the drawer is dragged open over the menu. the drawer's own handler
+ * is registered first, so without this the menu hidden behind it would take the gesture instead.
  */
 @Composable
 private fun DeckPickerFab(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     fabActions: FabActions,
+    backEnabled: Boolean,
     scrimOpacity: Float = 0.5f,
 ) {
     Scrim(
@@ -720,7 +728,7 @@ private fun DeckPickerFab(
             onImport = fabActions.onImport,
         )
     }
-    BackHandler(expanded) { onExpandedChange(false) }
+    BackHandler(expanded && backEnabled) { onExpandedChange(false) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -730,7 +738,7 @@ fun DeckPickerTopBarPreview() {
     AnkiDroidTheme {
         DeckPickerTopBar(
             isSearchOpen = false,
-            isDrawerOpen = false,
+            searchOwnsBack = true,
             onSearchOpenChange = {},
             searchQuery = "",
             onSearchQueryChanged = {},
@@ -755,7 +763,7 @@ fun DeckPickerTopBarSearchOpenPreview() {
     AnkiDroidTheme {
         DeckPickerTopBar(
             isSearchOpen = true,
-            isDrawerOpen = false,
+            searchOwnsBack = true,
             onSearchOpenChange = {},
             searchQuery = "Japanese",
             onSearchQueryChanged = {},
