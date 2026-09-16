@@ -263,6 +263,28 @@ jobs:
           This build is signed with this repository's own key, so Android will not install it over the Google Play version. Uninstall that first, after syncing or backing up your collection.
           EOF
 
+          # a folded list of the commit titles since the last release, so the notes say what changed without
+          # growing long. read from the api, not from git: this checkout is shallow and carries no tags
+          prev=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if [ -n "$prev" ] && [ "$prev" != "$TAG" ]; then
+            titles=$(gh api "repos/$GH_REPO/compare/$prev...$GITHUB_SHA" \
+              --jq '.commits[].commit.message | split("\n")[0]' 2>/dev/null || true)
+            if [ -n "$titles" ]; then
+              {
+                echo
+                echo '<details>'
+                echo "<summary>Changes since $prev</summary>"
+                echo
+                echo "$titles" | sed 's/^/- /'
+                echo
+                echo '</details>'
+              } >> "$RUNNER_TEMP/notes.md"
+            else
+              # a squashed or unrelated history has no comparable commits; the rest of the notes still stand
+              echo "::warning::no commit list between $prev and $GITHUB_SHA, so these notes carry no changelog"
+            fi
+          fi
+
           # a tag created with github.token triggers no workflows, so this starts no second run
           url=$(gh release create "$TAG" "${assets[@]}" --target "$GITHUB_SHA" --title "Hirameki $VERSION" --notes-file "$RUNNER_TEMP/notes.md")
           echo "Release: $url" >> "$GITHUB_STEP_SUMMARY"
