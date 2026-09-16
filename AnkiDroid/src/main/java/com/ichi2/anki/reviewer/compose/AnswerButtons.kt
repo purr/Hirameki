@@ -101,6 +101,15 @@ private val ratings = listOf(
 @Composable
 fun AnswerButtons(
     modifier: Modifier = Modifier,
+    /**
+     * Whether the bar acts on touches. False on a step the card view performs itself: the bar is laid out
+     * there anyway, so the card's room never changes across the reveal, but nothing on a bar drawn away to
+     * nothing may answer a tap the user cannot see they made. Every control honours it, the type-in field
+     * and the overflow button included: the card view serves neither, so those two are only ever composed
+     * with it true today, and they follow the one contract rather than carry a private rule that the next
+     * layout change would quietly break.
+     */
+    enabled: Boolean = true,
     isAnswerShown: Boolean,
     showButtonBadges: Boolean,
     colorizeAnswerButtons: Boolean = false,
@@ -131,7 +140,8 @@ fun AnswerButtons(
                     typedAnswer = typedAnswer,
                     onTypedAnswerChanged = onTypedAnswerChanged,
                     isAnswerShown = isAnswerShown,
-                    onShowAnswer = onShowAnswer
+                    onShowAnswer = onShowAnswer,
+                    enabled = enabled
                 )
             }
 
@@ -144,6 +154,7 @@ fun AnswerButtons(
                     if (!moreOptionsInTopAppBar) {
                         IconButton(
                             onClick = onMoreOptionsClick,
+                            enabled = enabled,
                             modifier = Modifier.height(AnswerButtonsConstants.ToolbarIconHeight),
                         ) {
                             Icon(
@@ -158,14 +169,15 @@ fun AnswerButtons(
                             .animateContentSize(motionScheme.fastSpatialSpec())
                     ) {
                         if (!isAnswerShown) {
-                            ShowAnswerButton(onShowAnswer = onShowAnswer)
+                            ShowAnswerButton(onShowAnswer = onShowAnswer, enabled = enabled)
                         } else {
                             RatingButtons(
                                 showButtonBadges = showButtonBadges,
                                 colorizeAnswerButtons = colorizeAnswerButtons,
                                 adjustButtonStylesForBadges = adjustButtonStylesForBadges,
                                 onRateCard = onRateCard,
-                                nextTimes = nextTimes
+                                nextTimes = nextTimes,
+                                enabled = enabled
                             )
                         }
                     }
@@ -180,7 +192,8 @@ private fun AnswerTypeInTextField(
     typedAnswer: String,
     onTypedAnswerChanged: (String) -> Unit,
     isAnswerShown: Boolean,
-    onShowAnswer: () -> Unit
+    onShowAnswer: () -> Unit,
+    enabled: Boolean
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -198,6 +211,9 @@ private fun AnswerTypeInTextField(
             ),
         shape = MaterialTheme.shapes.extraLargeIncreased,
         interactionSource = interactionSource,
+        // a covered bar is invisible, and an invisible field that still takes focus would raise the
+        // keyboard over a card the user is only looking at
+        enabled = enabled,
         readOnly = isAnswerShown,
         singleLine = true,
         colors = TextFieldDefaults.colors(
@@ -214,7 +230,10 @@ private fun AnswerTypeInTextField(
 }
 
 @Composable
-private fun ShowAnswerButton(onShowAnswer: () -> Unit) {
+private fun ShowAnswerButton(
+    onShowAnswer: () -> Unit,
+    enabled: Boolean
+) {
     val view = LocalView.current
 
     // as wide as the rating buttons it turns into, so the bar keeps its size across the reveal
@@ -223,6 +242,7 @@ private fun ShowAnswerButton(onShowAnswer: () -> Unit) {
             view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             onShowAnswer()
         },
+        enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
             .height(AnswerButtonsConstants.MainButtonHeight),
@@ -245,7 +265,8 @@ private fun RatingButtons(
     colorizeAnswerButtons: Boolean,
     adjustButtonStylesForBadges: Boolean,
     onRateCard: (CardAnswer.Rating) -> Unit,
-    nextTimes: List<String>
+    nextTimes: List<String>,
+    enabled: Boolean
 ) {
     val view = LocalView.current
     val ratingColors = LocalAnkiColors.current.ratings
@@ -282,6 +303,7 @@ private fun RatingButtons(
                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                 onRateCard(rating)
                             },
+                            enabled = enabled,
                             modifier = Modifier
                                 .height(AnswerButtonsConstants.MainButtonHeight)
                                 .fillMaxWidth()

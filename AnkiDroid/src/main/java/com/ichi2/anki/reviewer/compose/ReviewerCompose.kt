@@ -77,17 +77,18 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
@@ -559,16 +560,19 @@ fun ReviewerContent(
                                     .offset(y = -ScreenOffset)
                                     .padding(bottom = paddingValues.calculateBottomPadding())
                                     .onSizeChanged { toolbarHeight = it.height }
-                                    // on a step the card performs itself the buttons are measured but never
-                                    // placed: unseen and untouchable, yet their room is known before the first
-                                    // reveal. measured only once shown, the room arrived with the first flip
-                                    // and moved the card as it turned
-                                    .layout { measurable, constraints ->
-                                        val buttons = measurable.measure(constraints)
-                                        layout(buttons.width, buttons.height) {
-                                            if (!cardCoversThisStep) buttons.place(0, 0)
-                                        }
-                                    },
+                                    // on a step the card performs itself the bar is still laid out and placed, so its
+                                    // room is known before the first reveal: measured only once shown, the room
+                                    // arrived with the first flip and moved the card as it turned. it is drawn away to
+                                    // nothing, kept out of the screen reader's tree and disabled below, so it is
+                                    // neither seen, announced nor able to act on a touch.
+                                    // it used to be measured and deliberately left unplaced. compose records a node's
+                                    // screen rect only when the node is placed, so the whole bar stayed out of that
+                                    // register, and the first real placement - the reveal - walked the subtree marking
+                                    // it placed and threw IllegalArgumentException "LayoutNode N not found in
+                                    // RectList", which killed the reviewer
+                                    .alpha(if (cardCoversThisStep) 0f else 1f)
+                                    .then(if (cardCoversThisStep) Modifier.clearAndSetSemantics {} else Modifier),
+                            enabled = !cardCoversThisStep,
                             isAnswerShown = state.isAnswerShown,
                             showButtonBadges = state.showAnswerButtonBadges,
                             colorizeAnswerButtons = state.colorizeAnswerButtons,
