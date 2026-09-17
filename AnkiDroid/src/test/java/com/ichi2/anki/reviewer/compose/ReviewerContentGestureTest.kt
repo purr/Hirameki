@@ -15,14 +15,22 @@
  */
 package com.ichi2.anki.reviewer.compose
 
+import android.content.Context
+import android.view.accessibility.AccessibilityManager
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performCustomAccessibilityActionWithLabel
 import androidx.test.core.app.ApplicationProvider
@@ -35,9 +43,11 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.equalTo
+import org.hamcrest.Matchers.lessThan
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 
 /**
  * The whole reviewer screen on a real card, revealed and rated through what the user touches, for every
@@ -72,6 +82,75 @@ class ReviewerContentGestureTest : RobolectricTest() {
 
     @Test
     fun `classic view reveals and rates`() = revealAndRate(cardView = false, tapToFlip = true, dragToGrade = true)
+
+    @Test
+    fun `the overflow menu stays in the top bar on a card the card view hands to the classic layout`() =
+        runTest {
+            setGestures(cardView = true, tapToFlip = true, dragToGrade = true)
+            // a typed answer is served by the classic layout, even with the card view on
+            addBasicWithTypingNote("Hello", "World")
+            val viewModel = showReviewer()
+            assertThat("the classic layout serves this card", viewModel.state.value.showTypeInAnswer, equalTo(true))
+
+            val moreOptions = composeTestRule.onAllNodesWithContentDescription(getResourceString(R.string.more_options))
+            moreOptions.assertCountEquals(1)
+            val screen = composeTestRule.onRoot().getBoundsInRoot()
+            // decided by the card, the button moved down into the answer bar here and back up on the next card
+            assertThat(
+                "in the top bar, where it is on every other card",
+                moreOptions[0].getBoundsInRoot().bottom,
+                lessThan(screen.bottom / 2),
+            )
+        }
+
+    @Test
+    fun `a grade made through the card is read out to a screen reader`() =
+        runTest {
+            val accessibility = ApplicationProvider.getApplicationContext<Context>().getSystemService(AccessibilityManager::class.java)
+            shadowOf(accessibility).setTouchExplorationEnabled(true)
+            setGestures(cardView = true, tapToFlip = true, dragToGrade = true)
+            addBasicNote("Hello", "World")
+            addBasicNote("Second", "Card")
+            val viewModel = showReviewer()
+            cardAction(getResourceString(R.string.show_answer))
+            settle()
+            assertThat("answer shown", viewModel.state.value.isAnswerShown, equalTo(true))
+
+            val good = getResourceString(R.string.ease_button_good)
+            composeTestRule.mainClock.autoAdvance = false
+            cardAction(good)
+            testScheduler.advanceUntilIdle()
+            repeat(3) { composeTestRule.mainClock.advanceTimeByFrame() }
+
+            // the corner that confirms a dragged grade can be neither seen nor dragged to by a screen reader, which rates
+            // through the card's actions: the notice of the grade is shown to it, and read out as it appears
+            val liveGradeNotice =
+                SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite) and
+                    hasAnyDescendant(hasText(good))
+            composeTestRule.onNode(liveGradeNotice).assertExists()
+        }
+
+    private fun setGestures(
+        cardView: Boolean,
+        tapToFlip: Boolean,
+        dragToGrade: Boolean,
+    ) = editPreferences {
+        putBoolean(getResourceString(R.string.card_view_reviewer_key), cardView)
+        putBoolean(getResourceString(R.string.card_tap_to_flip_key), tapToFlip)
+        putBoolean(getResourceString(R.string.card_drag_to_grade_key), dragToGrade)
+    }
+
+    private fun TestScope.showReviewer(): ReviewerViewModel {
+        val viewModel = ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+        settle()
+        composeTestRule.setContent {
+            AnkiDroidTheme {
+                ReviewerContent(viewModel = viewModel, whiteboardViewModel = null, voicePlaybackViewModel = null)
+            }
+        }
+        settle()
+        return viewModel
+    }
 
     private fun revealAndRate(
         cardView: Boolean,

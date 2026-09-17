@@ -56,7 +56,10 @@ data class CardMotionSpec(
     val registerAt: Float = 0.55f,
     /** How far the flight path bows sideways, as a fraction of its length. 0 is a straight line. */
     val pathCurve: Float = 0.14f,
-    /** Movement below this fraction of the card's shorter side picks no corner at all. */
+    /**
+     * A card within this fraction of its shorter side of either axis through the middle picks no corner at all, so a
+     * flick straight down or sideways, aimed between two corners, grades neither.
+     */
     val deadZone: Float = 0.06f,
     /**
      * How far outside the card, as a fraction of its shorter side, a touch still picks it up. Beyond

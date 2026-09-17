@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Badge
@@ -47,6 +48,7 @@ import androidx.compose.material3.FloatingToolbarDefaults
 import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MaterialTheme.motionScheme
 import androidx.compose.material3.Text
@@ -65,7 +67,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.min
+import androidx.compose.ui.unit.sp
 import anki.scheduler.CardAnswer
 import com.ichi2.anki.R
 import com.ichi2.anki.ui.compose.theme.AnkiDroidTheme
@@ -88,6 +93,9 @@ private object AnswerButtonsConstants {
     val AdjustedBadgeBottomPadding = 2.dp
     val AdjustedTextTopPadding = 14.dp
     val AdjustedButtonHorizontalPadding = 28.dp
+
+    /** Smallest a long "Show answer" label shrinks to before it is cut short with an ellipsis. */
+    val MinLabelFontSize = 12.sp
 }
 
 private val ratings = listOf(
@@ -130,6 +138,8 @@ fun AnswerButtons(
         // ratings, so a short label such as "Good" gets as much room as "Again"
         val barWidth =
             (maxWidth - AnswerButtonsConstants.BarEdgeMargin * 2).coerceIn(0.dp, AnswerButtonsConstants.BarMaxWidth)
+        // capped with the bar it sits on: a fraction of the screen alone stretched it far past the bar on a tablet
+        val typeInWidth = min(maxWidth * AnswerButtonsConstants.TEXT_FIELD_MAX_WIDTH_FRACTION, barWidth)
 
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -141,7 +151,8 @@ fun AnswerButtons(
                     onTypedAnswerChanged = onTypedAnswerChanged,
                     isAnswerShown = isAnswerShown,
                     onShowAnswer = onShowAnswer,
-                    enabled = enabled
+                    enabled = enabled,
+                    width = typeInWidth,
                 )
             }
 
@@ -193,7 +204,8 @@ private fun AnswerTypeInTextField(
     onTypedAnswerChanged: (String) -> Unit,
     isAnswerShown: Boolean,
     onShowAnswer: () -> Unit,
-    enabled: Boolean
+    enabled: Boolean,
+    width: Dp,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -203,7 +215,7 @@ private fun AnswerTypeInTextField(
         onValueChange = onTypedAnswerChanged,
         label = { Text(stringResource(R.string.type_in_the_answer)) },
         modifier = Modifier
-            .fillMaxWidth(AnswerButtonsConstants.TEXT_FIELD_MAX_WIDTH_FRACTION)
+            .width(width)
             .border(
                 AnswerButtonsConstants.TextFieldBorderWidth,
                 if (isFocused) MaterialTheme.colorScheme.tertiary else Color.Transparent,
@@ -250,10 +262,17 @@ private fun ShowAnswerButton(
             MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.onPrimary
         )
     ) {
+        // a long translation or a large font scale shrinks the label to fit the fixed-width bar, and only past a readable
+        // floor is it cut short, with an ellipsis rather than clipped mid-letter
         Text(
             text = stringResource(R.string.show_answer),
-            softWrap = false,
-            overflow = TextOverflow.Clip
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            autoSize =
+                TextAutoSize.StepBased(
+                    minFontSize = AnswerButtonsConstants.MinLabelFontSize,
+                    maxFontSize = LocalTextStyle.current.fontSize,
+                ),
         )
     }
 }
@@ -352,10 +371,14 @@ private fun RatingButtons(
                                 containerColor = badgeContainerColor,
                                 contentColor = badgeContentColor,
                             ) {
+                                // one line within the button's share of the bar: a long rating name wrapped and grew the
+                                // badge past its button. the full name stays in the button's description
                                 Text(
                                     modifier = Modifier.padding(1.dp),
                                     text = labelText,
-                                    style = MaterialTheme.typography.labelSmall
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }

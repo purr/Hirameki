@@ -17,6 +17,7 @@
  ****************************************************************************************/
 package com.ichi2.anki.reviewer.compose
 
+import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -65,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -88,12 +90,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.core.content.getSystemService
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import anki.scheduler.CardAnswer
@@ -209,21 +215,36 @@ fun ReviewerContent(
     val totalBottomPadding =
         toolbarHeightDp + (if (state.isWhiteboardEnabled) whiteboardToolbarHeightDp + 8.dp else 0.dp)
 
+    // read once for the screen. these only change in the app's settings, which cannot be open over the reviewer, and
+    // read inline they cost up to nine preference lookups on every recomposition, one per keystroke of a typed answer
+    val cardViewSetting = remember { Prefs.cardViewReviewer }
+    val tapToFlip = remember { Prefs.cardTapToFlip }
+    val dragToGrade = remember { Prefs.cardDragToGrade }
+    // where the overflow menu lives follows the settings, not the card: the card view hands a card with a typed answer
+    // or a whiteboard to the classic layout, and deciding by that moved the button between the top bar and the answer
+    // bar from one card to the next
+    val moreOptionsInTopBar = remember { Prefs.moreOptionsInTopAppBar || cardViewSetting }
+
     // the card view replaces the flashcard and the answer buttons together. it cannot serve type-in
     // answers (the text field lives inside the buttons) or whiteboard sessions (the canvas needs the
     // touches), so those keep the classic layout.
-    val useCardView = Prefs.cardViewReviewer && !state.showTypeInAnswer && !state.isWhiteboardEnabled
+    val useCardView = cardViewSetting && !state.showTypeInAnswer && !state.isWhiteboardEnabled
 
     // the card only stands in for the buttons on a step it can perform itself: with tap-to-reveal off it
     // cannot show the answer, with drag-to-grade off it cannot rate, and without buttons the session
     // would stall with no way forward
     val cardCoversThisStep =
-        useCardView && (if (state.isAnswerShown) Prefs.cardDragToGrade else Prefs.cardTapToFlip)
+        useCardView && (if (state.isAnswerShown) dragToGrade else tapToFlip)
 
     // with only one card gesture on, the answer buttons come and go between the two steps. their room is
     // kept on both, so the card neither jumps nor reflows in the middle of the flip
     val keepsAnswerBarRoom =
-        !cardCoversThisStep || (useCardView && !(Prefs.cardTapToFlip && Prefs.cardDragToGrade))
+        !cardCoversThisStep || (useCardView && !(tapToFlip && dragToGrade))
+
+    // collected once, for both the card's room and the toolbar itself
+    val voiceToolbarVisible = voicePlaybackViewModel?.isVisible?.collectAsStateWithLifecycle()?.value == true
+    val voiceToolbarShown = state.isVoicePlaybackEnabled && voiceToolbarVisible
+    val isScreenReaderOn = rememberIsScreenReaderOn()
 
     // the measured button height is only written while the answer buttons are on screen, so it goes
     // stale once the card hides them; things stacked above the buttons read this instead
@@ -369,7 +390,7 @@ fun ReviewerContent(
                 isAnswerShown = state.isAnswerShown,
                 // the overflow button normally sits in the answer buttons, which the card view hides; the
                 // menu (undo, edit, bury, suspend, whiteboard) must live in the top bar or be unreachable
-                showMoreOptions = Prefs.moreOptionsInTopAppBar || useCardView,
+                showMoreOptions = moreOptionsInTopBar,
                 onMoreOptionsClick = { showBottomSheet = true },
             ) { viewModel.onEvent(ReviewerEvent.UnanswerCard) }
         }) { paddingValues ->
@@ -402,9 +423,6 @@ fun ReviewerContent(
                     ) {}
 
                     if (useCardView) {
-                        val voiceToolbarShown =
-                            state.isVoicePlaybackEnabled &&
-                                voicePlaybackViewModel?.isVisible?.collectAsStateWithLifecycle()?.value == true
                         // the card's room ends where the highest thing along the bottom begins: the voice
                         // toolbar, which stacks above the answer buttons, or else the answer buttons' room.
                         // mirrors the offsets those toolbars are placed with below
@@ -428,13 +446,14 @@ fun ReviewerContent(
                                 viewModel.onEvent(ReviewerEvent.LinkClicked(it))
                             },
                             isAnswerShown = state.isAnswerShown,
-                            tapToFlip = Prefs.cardTapToFlip,
-                            dragToGrade = Prefs.cardDragToGrade,
+                            tapToFlip = tapToFlip,
+                            dragToGrade = dragToGrade,
                             nextTimes = state.nextTimes,
                             replayFinished = state.replayFinished,
                             onShowAnswer = { viewModel.onEvent(ReviewerEvent.ShowAnswer) },
                             onUnanswer = { viewModel.onEvent(ReviewerEvent.UnanswerCard) },
                             onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
+                            recordedRating = state.answerFeedback,
                             modifier = Modifier.padding(bottom = paddingValues.calculateBottomPadding() + bottomRoom),
                         )
                     } else {
@@ -529,28 +548,25 @@ fun ReviewerContent(
                     }
 
                     // Voice Playback Toolbar
-                    if (state.isVoicePlaybackEnabled && voicePlaybackViewModel != null) {
-                        val voicePlaybackIsVisible by voicePlaybackViewModel.isVisible.collectAsStateWithLifecycle()
-                        if (voicePlaybackIsVisible) {
-                            VoicePlaybackToolbar(
-                                viewModel = voicePlaybackViewModel,
-                                onToggleRecording = {
-                                    voicePlaybackViewModel.toggleRecording(currentContext)
-                                },
-                                onDismiss = {
-                                    viewModel.onEvent(ReviewerEvent.ToggleVoicePlayback)
-                                },
-                                modifier =
-                                    Modifier
-                                        .align(Alignment.BottomCenter)
-                                        .offset(y = -ScreenOffset - answerBarHeightDp - VoiceToolbarGap)
-                                        .padding(bottom = paddingValues.calculateBottomPadding())
-                                        // after the inset padding, so it measures the toolbar alone: a modifier
-                                        // sees everything after it in the chain, and measured first it counted
-                                        // the navigation bar, which the card's padding already clears
-                                        .onSizeChanged { voiceToolbarHeight = it.height },
-                            )
-                        }
+                    if (voiceToolbarShown) {
+                        VoicePlaybackToolbar(
+                            viewModel = voicePlaybackViewModel,
+                            onToggleRecording = {
+                                voicePlaybackViewModel.toggleRecording(currentContext)
+                            },
+                            onDismiss = {
+                                viewModel.onEvent(ReviewerEvent.ToggleVoicePlayback)
+                            },
+                            modifier =
+                                Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .offset(y = -ScreenOffset - answerBarHeightDp - VoiceToolbarGap)
+                                    .padding(bottom = paddingValues.calculateBottomPadding())
+                                    // after the inset padding, so it measures the toolbar alone: a modifier
+                                    // sees everything after it in the chain, and measured first it counted
+                                    // the navigation bar, which the card's padding already clears
+                                    .onSizeChanged { voiceToolbarHeight = it.height },
+                        )
                     }
 
                     if (keepsAnswerBarRoom) {
@@ -588,7 +604,7 @@ fun ReviewerContent(
                             onRateCard = { viewModel.onEvent(ReviewerEvent.RateCard(it)) },
                             nextTimes = state.nextTimes,
                             // in card view the menu already sits in the top bar; do not offer it twice
-                            moreOptionsInTopAppBar = Prefs.moreOptionsInTopAppBar || useCardView,
+                            moreOptionsInTopAppBar = moreOptionsInTopBar,
                             onMoreOptionsClick = { showBottomSheet = true },
                         )
                     }
@@ -600,8 +616,9 @@ fun ReviewerContent(
                                 .padding(end = 16.dp, top = 16.dp),
                         feedback = state.answerFeedback,
                         // a card dragged into a corner is confirmed by that corner; a second notice of the
-                        // same rating up here is noise
-                        isShown = !(useCardView && Prefs.cardDragToGrade),
+                        // same rating up here is noise. not to a screen reader, which can neither see the corner nor
+                        // drag: it rates through the card's actions, and this notice is all it hears of the grade
+                        isShown = !(useCardView && dragToGrade) || isScreenReaderOn,
                         onDismissed = { viewModel.onEvent(ReviewerEvent.AnswerFeedbackShown) },
                     )
                 }
@@ -819,6 +836,8 @@ fun AnswerIndicator(
         // Use the cached lastFeedback to avoid disappearing mid-animation
         lastFeedback?.let { current ->
             Surface(
+                // read out as it appears, as a snackbar is: a rating recorded is otherwise silent to a screen reader
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 shape = MaterialTheme.shapes.extraExtraLarge,
                 color = MaterialTheme.colorScheme.tertiaryContainer,
                 contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -831,6 +850,23 @@ fun AnswerIndicator(
             }
         }
     }
+}
+
+/**
+ * Whether a screen reader is exploring the screen by touch, kept current while the reviewer is open. Such a reader
+ * cannot drag the card or see its corners, so the screen confirms grades it would otherwise leave to them.
+ */
+@Composable
+private fun rememberIsScreenReaderOn(): Boolean {
+    val context = LocalContext.current
+    val manager = remember(context) { context.getSystemService<AccessibilityManager>() }
+    var isOn by remember(manager) { mutableStateOf(manager?.isTouchExplorationEnabled == true) }
+    DisposableEffect(manager) {
+        val listener = AccessibilityManager.TouchExplorationStateChangeListener { isOn = it }
+        manager?.addTouchExplorationStateChangeListener(listener)
+        onDispose { manager?.removeTouchExplorationStateChangeListener(listener) }
+    }
+    return isOn
 }
 
 private fun CardAnswer.Rating.toResId(): Int =

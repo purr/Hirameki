@@ -19,6 +19,7 @@ import android.annotation.SuppressLint
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -36,13 +37,17 @@ import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.containsString
 import org.hamcrest.Matchers.empty
 import org.hamcrest.Matchers.equalTo
+import org.hamcrest.Matchers.greaterThan
+import org.hamcrest.Matchers.greaterThanOrEqualTo
 import org.hamcrest.Matchers.not
+import org.hamcrest.Matchers.nullValue
 import org.hamcrest.Matchers.sameInstance
 import org.junit.Rule
 import org.junit.Test
 import org.junit.jupiter.api.assertDoesNotThrow
 import org.junit.runner.RunWith
 import org.mockito.MockedStatic
+import org.mockito.Mockito.atLeastOnce
 import org.mockito.Mockito.mockStatic
 import org.mockito.kotlin.any
 import org.mockito.kotlin.argumentCaptor
@@ -64,6 +69,9 @@ class FlashcardTest : RobolectricTest() {
     private var answerShown by mutableStateOf(false)
     private var showing by mutableStateOf(true)
     private var paintKey by mutableLongStateOf(0L)
+    private var toolbarHeight by mutableIntStateOf(0)
+    private var replayFinished = 0
+    private val longPresses = mutableListOf<Boolean>()
 
     @Test
     fun `a dead renderer is replaced by a fresh webview that shows the same card and side`() {
@@ -188,16 +196,38 @@ class FlashcardTest : RobolectricTest() {
             showCard()
             val page = page()
             shellLoaded(page)
-            val listener = argumentCaptor<WebViewCompat.WebMessageListener>()
-            webViewCompat.verify { WebViewCompat.addWebMessageListener(eq(page), any(), any(), listener.capture()) }
+            val listeners = argumentCaptor<WebViewCompat.WebMessageListener>()
+            webViewCompat.verify({ WebViewCompat.addWebMessageListener(eq(page), any(), any(), listeners.capture()) }, atLeastOnce())
 
-            // any script on the card can reach the bridge, and postMessage takes an arraybuffer as readily
+            // any script on the card can reach every bridge, and postMessage takes an arraybuffer as readily
             // as a string; read as a string it throws out of a webview callback, which kills the app
             assertDoesNotThrow {
                 composeTestRule.runOnIdle {
-                    listener.firstValue.onPostMessage(page, WebMessageCompat(byteArrayOf(1)), BASE_URL.toUri(), true, mock())
+                    listeners.allValues.forEach {
+                        it.onPostMessage(page, WebMessageCompat(byteArrayOf(1)), BASE_URL.toUri(), true, mock())
+                    }
                 }
             }
+        }
+
+    // the listener and the messages are mocks; no real webview is asked for the web message features
+    @SuppressLint("RequiresFeature")
+    @Test
+    fun `what the page says of a long press reaches the app, from the page itself only`() =
+        withPaintReports { webViewCompat ->
+            showCard()
+            val page = page()
+            val listener = argumentCaptor<WebViewCompat.WebMessageListener>()
+            webViewCompat.verify { WebViewCompat.addWebMessageListener(eq(page), eq(LONG_PRESS_BRIDGE), any(), listener.capture()) }
+
+            composeTestRule.runOnIdle {
+                listener.firstValue.onPostMessage(page, WebMessageCompat(LONG_PRESS_SELECTED), BASE_URL.toUri(), true, mock())
+                listener.firstValue.onPostMessage(page, WebMessageCompat("none"), BASE_URL.toUri(), true, mock())
+                // a card's own iframe can share the page's origin, and its long presses are its own
+                listener.firstValue.onPostMessage(page, WebMessageCompat(LONG_PRESS_SELECTED), BASE_URL.toUri(), false, mock())
+            }
+
+            assertThat(longPresses, equalTo(listOf(true, false)))
         }
 
     @Test
@@ -279,6 +309,75 @@ class FlashcardTest : RobolectricTest() {
         composeTestRule.runOnIdle { assertThat(shadowOf(page).lastEvaluatedJavascript, containsString("m.pause()")) }
     }
 
+    @Test
+    fun `a show fits the card's text once it is swapped in, before its paint is reported`() {
+        showCard()
+        val page = page()
+        shellLoaded(page)
+
+        composeTestRule.runOnIdle {
+            val show = shadowOf(page).lastEvaluatedJavascript
+            val swap = show.indexOf("_showQuestion(")
+            val fit = show.indexOf("hiramekiFitText()")
+            val report = show.indexOf("postMessage(")
+            assertThat("the show swaps the card in", swap, greaterThanOrEqualTo(0))
+            // queued behind the show, it measures the typeset card in the task that makes it visible; the paint
+            // report after it then covers the fitted card
+            assertThat("the fit is queued after the swap", fit, greaterThan(swap))
+            assertThat("and before the paint report", report, greaterThan(fit))
+            assertThat("queued, not run as the show is sent", show.substring(swap, fit), containsString("_queueAction("))
+        }
+    }
+
+    @Test
+    fun `a new answer bar height fits the card's text to its new room`() {
+        showCard()
+        val page = page()
+        shellLoaded(page)
+
+        toolbarHeight = 120
+
+        composeTestRule.runOnIdle {
+            val update = shadowOf(page).lastEvaluatedJavascript
+            assertThat("the style block with the new room", update, containsString("padding-bottom: 120px;"))
+            assertThat("fitted again after it", update.indexOf("hiramekiFitText()"), greaterThan(update.indexOf("padding-bottom: 120px;")))
+        }
+    }
+
+    @Test
+    fun `the page script can fit a card's text`() {
+        showCard()
+        val shell = shadowOf(page()).lastLoadDataWithBaseURL.data
+        // the fit itself is plain page javascript; its rules are exercised against a layout model outside robolectric,
+        // which has no layout engine (tools/asset-tests). here: the shell carries it, under the name the shows call,
+        // and the style block allows it
+        assertThat(shell, containsString("window.hiramekiFitText = fitText;"))
+        assertThat(shell, containsString(FIT_ALLOWED))
+    }
+
+    @Test
+    fun `with font size changes off the page does not fit a card's text`() {
+        Prefs.putString(R.string.apply_hirameki_css_preference, Prefs.HIRAMEKI_CSS_NO_FONT_SIZE)
+        showCard()
+        val shell = shadowOf(page()).lastLoadDataWithBaseURL.data
+
+        assertThat("the rest of hirameki css still applies", shell, containsString("--hirameki-primary:"))
+        // a user who chose to keep a deck's own font sizes had them changed on every card taller than its page
+        assertThat(shell, not(containsString(FIT_ALLOWED)))
+    }
+
+    @Test
+    fun `a page made for a face turned away, after replays have finished, sends that page nothing before it loads`() {
+        showing = false
+        replayFinished = 3
+        showCard()
+
+        composeTestRule.runOnIdle {
+            // unseeded, a new page read a replay restore and a media pause from its defaults and sent both at once
+            assertThat(shadowOf(page()).lastEvaluatedJavascript, nullValue())
+        }
+    }
+
     private fun showCard() {
         composeTestRule.setContent {
             Flashcard(
@@ -292,9 +391,12 @@ class FlashcardTest : RobolectricTest() {
                 onTap = {},
                 onLinkClick = {},
                 isAnswerShown = answerShown,
+                toolbarHeight = toolbarHeight,
+                replayFinished = replayFinished,
                 isShowing = showing,
                 onWebView = { page, alive -> if (alive) pages += page else pages -= page },
                 paintKey = paintKey,
+                onLongPress = { longPresses += it },
             )
         }
     }
@@ -321,7 +423,7 @@ class FlashcardTest : RobolectricTest() {
         return composeTestRule.runOnIdle { shadowOf(page).webViewClient.onRenderProcessGone(page, detail) }
     }
 
-    /** runs [block] with a webview that can message the app, so a page can report what it drew */
+    /** runs [block] with a webview that can message the app, so a page can report what it drew and its long presses */
     private fun withPaintReports(block: (MockedStatic<WebViewCompat>) -> Unit) {
         mockStatic(WebViewFeature::class.java).use { feature ->
             feature.`when`<Boolean> { WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) }.thenReturn(true)
@@ -340,7 +442,7 @@ class FlashcardTest : RobolectricTest() {
         webViewCompat: MockedStatic<WebViewCompat>,
     ) {
         val listener = argumentCaptor<WebViewCompat.WebMessageListener>()
-        webViewCompat.verify { WebViewCompat.addWebMessageListener(eq(page), any(), any(), listener.capture()) }
+        webViewCompat.verify { WebViewCompat.addWebMessageListener(eq(page), eq(PAINT_BRIDGE), any(), listener.capture()) }
         val report = requireNotNull(PAINT_REPORT.find(shadowOf(page).lastEvaluatedJavascript)) { "the page was sent no show" }
         val view = mock<WebView> { on { tag } doReturn page.tag }
         doAnswer { it.getArgument<WebView.VisualStateCallback>(1).onComplete(it.getArgument(0)) }
@@ -353,6 +455,9 @@ class FlashcardTest : RobolectricTest() {
 
     private companion object {
         const val BASE_URL = "http://127.0.0.1:1/"
+
+        /** the style block's word to the page script that it may fit a card's text */
+        const val FIT_ALLOWED = "--hirameki-fit: 1;"
 
         /** the paint report a show asks the page to send, carrying the show's sequence number */
         val PAINT_REPORT = Regex("""postMessage\('(\d+)'\)""")

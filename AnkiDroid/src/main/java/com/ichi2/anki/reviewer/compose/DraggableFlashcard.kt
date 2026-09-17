@@ -86,6 +86,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import anki.scheduler.CardAnswer
 import com.ichi2.anki.R
+import com.ichi2.anki.reviewer.AnswerFeedback
 import com.ichi2.anki.reviewer.ReviewerJavascriptCommand
 import com.ichi2.anki.ui.compose.theme.LocalAnkiColors
 import kotlinx.coroutines.delay
@@ -120,6 +121,13 @@ private const val LANDING_FLARE_ALPHA = 0.3f
 private const val LANDING_LABEL_POP = 0.22f
 private const val LABEL_IDLE_ALPHA = 0.55f
 private const val GLOW_SETTLED = 0.002f
+
+/**
+ * Strokes of the outer and inner ring a well draws as the card nears it. In dp: they were 3 and 2 raw pixels, which
+ * thinned to a hairline as screen density rose; these match that weight on a common 420 dpi phone.
+ */
+private val AimRingOuterStroke = 1.dp
+private val AimRingInnerStroke = 0.75.dp
 
 /** The thumb-lock solve stops once a step moves the centre less than this many px. */
 private const val THUMB_LOCK_TOLERANCE_PX = 0.05f
@@ -170,6 +178,18 @@ private enum class GradeCorner(
 
 /** Whether this corner sits on the left of the screen, which flips with the layout direction. */
 private fun GradeCorner.isLeft(isRtl: Boolean) = towardsStart != isRtl
+
+private fun quadrantIndex(
+    towardsStart: Boolean,
+    towardsTop: Boolean,
+) = (if (towardsStart) 1 else 0) + (if (towardsTop) 2 else 0)
+
+/**
+ * The corners by quadrant, indexed by [quadrantIndex]. Built once from the corners' own directions: the thumb-lock
+ * solve looks a quadrant up as often as 64 times a frame, and searching the entries allocated an iterator each time.
+ */
+private val CORNERS_BY_QUADRANT: Array<GradeCorner> =
+    Array(4) { index -> GradeCorner.entries.first { quadrantIndex(it.towardsStart, it.towardsTop) == index } }
 
 /**
  * Tracks a face's current webview. A face keeps one page and swaps cards inside it; it only gets a new one when
@@ -276,6 +296,11 @@ fun DraggableFlashcard(
     onShowAnswer: () -> Unit,
     onUnanswer: () -> Unit,
     onRateCard: (CardAnswer.Rating) -> Unit,
+    /**
+     * The view model's word that a rating was recorded. A corner only ripples once the grade dropped into it is
+     * recorded: the view model refuses some ratings, and a ripple for those confirmed a grade never written.
+     */
+    recordedRating: AnswerFeedback?,
     modifier: Modifier = Modifier,
     spec: CardMotionSpec = CardMotionSpec.Default,
 ) {
@@ -292,6 +317,7 @@ fun DraggableFlashcard(
     val liveDragToGrade by rememberUpdatedState(dragToGrade)
     val liveIsRtl by rememberUpdatedState(isRtl)
     val liveRate by rememberUpdatedState(onRateCard)
+    val liveShowAnswer by rememberUpdatedState(onShowAnswer)
 
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
     var cardSizePx by remember { mutableStateOf(IntSize.Zero) }
@@ -324,6 +350,9 @@ fun DraggableFlashcard(
     var landedCorner by remember { mutableStateOf<GradeCorner?>(null) }
     val landing = remember { Animatable(1f) }
 
+    // the corner a card was dropped into, until the view model records that grade and the corner ripples
+    var awaitingRecord by remember { mutableStateOf<GradeCorner?>(null) }
+
     fun landingOf(corner: GradeCorner): Float = if (corner == landedCorner) landing.value else 1f
 
     // composed while the answer is already up (coming back to the reviewer): start turned, not turning
@@ -339,7 +368,18 @@ fun DraggableFlashcard(
     var paintedFront by remember { mutableLongStateOf(Long.MIN_VALUE) }
     var paintedBack by remember { mutableLongStateOf(Long.MIN_VALUE) }
 
+    // whether the long press of the touch under way selected text, as the page reports it; null until it has. only the
+    // drag handler reads it, which clears it at each touch-down
+    var longPressSelectedText by remember { mutableStateOf<Boolean?>(null) }
+
     fun visiblePage(): WebView? = pages[if (showsBackFace) 1 else 0]
+
+    /**
+     * Whether a drag may grade: grading is on, the answer is up, and it has turned into view. Armed on the answer
+     * alone, the card could be graded while it still showed its question, for as long as the answer took to paint
+     * before the turn began.
+     */
+    fun armed(): Boolean = liveDragToGrade && liveAnswerShown && showsBackFace
 
     /** Where a corner sits, from the card's resting centre. Mirrored in RTL to stay under its label. */
     fun anchorFor(corner: GradeCorner): Offset {
@@ -364,17 +404,17 @@ fun DraggableFlashcard(
     }
 
     /** The corner whose quarter of the screen [offset] points into, with no dead zone. */
-    fun quadrantOf(offset: Offset): GradeCorner {
-        val towardsStart = (offset.x < 0f) != liveIsRtl
-        val towardsTop = offset.y < 0f
-        return GradeCorner.entries.first { it.towardsStart == towardsStart && it.towardsTop == towardsTop }
-    }
+    fun quadrantOf(offset: Offset): GradeCorner = CORNERS_BY_QUADRANT[quadrantIndex((offset.x < 0f) != liveIsRtl, offset.y < 0f)]
 
-    /** The corner a release would grade into: none until the card has left the middle. */
+    /**
+     * The corner a release would grade into: none until the card has left the middle, and none while it is still
+     * near either axis. Straight down lies between Again and Good, and straight sideways between two corners as
+     * well: a pixel of drift picked one of two opposite grades for a flick aimed at neither.
+     */
     fun cornerUnder(offset: Offset): GradeCorner? {
         if (cardSizePx == IntSize.Zero) return null
         val dead = min(cardSizePx.width, cardSizePx.height) * liveSpec.deadZone
-        if (offset.getDistance() < dead) return null
+        if (abs(offset.x) < dead || abs(offset.y) < dead) return null
         return quadrantOf(offset)
     }
 
@@ -539,12 +579,9 @@ fun DraggableFlashcard(
             // hidden and disarmed until the view model delivers the next card. arriving in the corner is
             // not the next card being ready: shown again now, the old card could be graded a second time
             phase = CardPhase.Away
-            // the corner answers for the grade, in place of a separate notice of which rating it was
-            landedCorner = corner
-            scope.launch {
-                landing.snapTo(0f)
-                landing.animateTo(1f, tween(liveSpec.landMillis, easing = LinearEasing))
-            }
+            // the corner answers for the grade, in place of a separate notice of which rating it was, once the grade
+            // is recorded; see recordedRating
+            awaitingRecord = corner
             liveRate(corner.rating)
         }
     }
@@ -561,7 +598,7 @@ fun DraggableFlashcard(
         if (phase.isHidden || (phase == CardPhase.Flight && isGrading)) return false
         // re-checked here, not only at touch-down: a finger that lands during a throw and starts moving
         // after the next card has loaded would otherwise pick that card up, question side and all
-        if (!(liveDragToGrade && liveAnswerShown) || liveCardKey != cardAtDown) return false
+        if (!armed() || liveCardKey != cardAtDown) return false
         if (cardSizePx == IntSize.Zero || containerSize == IntSize.Zero) return false
         val shown = currentOffset()
         val journey = journeyOf(quadrantOf(shown), shown)
@@ -589,7 +626,7 @@ fun DraggableFlashcard(
         if (phase != CardPhase.Drag) return
         // turned back to the question, or the setting switched off, mid-drag: the card lets go. the
         // handler outlives arming, so nothing else stops a drag that began while it was armed
-        if (!(liveDragToGrade && liveAnswerShown)) return driftHome()
+        if (!armed()) return driftHome()
         thumbOffset += delta
         cardOffset = centreUnderThumb(thumbOffset, cardOffset)
         val corner = cornerUnder(cardOffset)
@@ -602,7 +639,7 @@ fun DraggableFlashcard(
     fun release(velocity: Velocity) {
         if (phase != CardPhase.Drag) return
         // a release is only a grade while the answer is up and grading by drag is on
-        if (!(liveDragToGrade && liveAnswerShown)) return driftHome()
+        if (!armed()) return driftHome()
         val corner = activeCorner ?: return driftHome()
         val axis = anchorFor(corner)
         val axisLength = axis.getDistance().coerceAtLeast(1f)
@@ -624,6 +661,21 @@ fun DraggableFlashcard(
         }
     }
 
+    // declared ahead of the card effect below: effects start in this order, so a record that reaches the screen in the
+    // same frame as the next card still finds the corner it confirms
+    LaunchedEffect(recordedRating) {
+        val corner = awaitingRecord ?: return@LaunchedEffect
+        if (recordedRating?.rating != corner.rating) return@LaunchedEffect
+        awaitingRecord = null
+        landedCorner = corner
+        // on the remembered scope: the record is acknowledged within a frame, and that restart must not cut the ripple
+        scope.launch {
+            landing.snapTo(0f)
+            landing.animateTo(1f, tween(liveSpec.landMillis, easing = LinearEasing))
+        }
+    }
+
+    // the effects read liveSpec, as the gesture does, rather than the spec they happened to start with
     LaunchedEffect(cardKey, isAnswerShown) {
         val face = if (isAnswerShown) FULL_TURN else 0f
         if (cardKey != lastCardKey) {
@@ -642,10 +694,10 @@ fun DraggableFlashcard(
             if (isAnswerShown && flip.value != face) {
                 // the back swaps the new answer in while the question is up; turning before it has painted
                 // would bring the last card's answer round
-                withTimeoutOrNull(spec.paintWaitMillis.toLong()) { snapshotFlow { paintedBack }.first { it == cardKey } }
-                    ?: Timber.w("card view: answer of card %d not painted after %d ms, turning anyway", cardKey, spec.paintWaitMillis)
+                withTimeoutOrNull(liveSpec.paintWaitMillis.toLong()) { snapshotFlow { paintedBack }.first { it == cardKey } }
+                    ?: Timber.w("card view: answer of card %d not painted after %d ms, turning anyway", cardKey, liveSpec.paintWaitMillis)
             }
-            flip.animateTo(face, tween(spec.flipMillis, easing = FastOutSlowInEasing))
+            flip.animateTo(face, tween(liveSpec.flipMillis, easing = FastOutSlowInEasing))
             // turning the card back over drops any aim at a corner
             if (!isAnswerShown && phase == CardPhase.Idle) resetToRest()
         }
@@ -653,12 +705,13 @@ fun DraggableFlashcard(
 
     LaunchedEffect(phase) {
         if (phase != CardPhase.Away) return@LaunchedEffect
-        delay(spec.awayTimeoutMillis.toLong())
+        delay(liveSpec.awayTimeoutMillis.toLong())
         if (phase == CardPhase.Away) {
             // the view model refuses a rating it must not record, such as one for a page that was never
             // served; with no next card coming, the graded card has to come back rather than leave the
             // screen empty
-            Timber.w("card view: no next card %d ms after grading, showing the card again", spec.awayTimeoutMillis)
+            Timber.w("card view: no next card %d ms after grading, showing the card again", liveSpec.awayTimeoutMillis)
+            awaitingRecord = null
             resetToRest()
             playEntrance()
         }
@@ -671,14 +724,16 @@ fun DraggableFlashcard(
         // snapped to the new card: the blink of issue #135. the wait is for the face that will be up: a restore
         // after process death reveals the answer in the same card action as the load, and the answer bar can reveal
         // it while the card arrives, and then the entrance shows the back
-        withTimeoutOrNull(spec.paintWaitMillis.toLong()) {
+        withTimeoutOrNull(liveSpec.paintWaitMillis.toLong()) {
             snapshotFlow { if (liveAnswerShown) paintedBack else paintedFront }.first { it == cardKey }
         } ?: Timber.w(
             "card view: %s of card %d not painted after %d ms, showing it anyway",
             if (liveAnswerShown) "answer" else "question",
             cardKey,
-            spec.paintWaitMillis,
+            liveSpec.paintWaitMillis,
         )
+        // a grade still unrecorded once the next card is in never will be: the view model moved on without recording it
+        awaitingRecord = null
         phase = CardPhase.Idle
         playEntrance()
     }
@@ -691,47 +746,48 @@ fun DraggableFlashcard(
     val labelHideAnswer = stringResource(R.string.hide_answer)
     val labelQuestionSide = stringResource(R.string.card_view_question_side)
     val labelAnswerSide = stringResource(R.string.card_view_answer_side)
-    // a screen reader cannot drag or aim a tap, so each step of the card is offered as an action
+    // a screen reader cannot drag or aim a tap, so each step of the card is offered as an action. keyed on the labels
+    // alone and calling through the live callbacks: keyed on the callbacks too, a caller's fresh lambda rebuilt the
+    // actions, and invalidated the card's semantics, on every recomposition. a grade made through an action is confirmed
+    // by its corner once recorded, as a dragged one is: switch access and voice access users rate through these actions
+    // too, and they can see the corner, while the notice of a grade is only shown to a screen reader
     val ratingActions =
-        remember(labelAgain, labelHard, labelGood, labelEasy, onRateCard) {
+        remember(labelAgain, labelHard, labelGood, labelEasy) {
+            fun rateAction(
+                label: String,
+                corner: GradeCorner,
+            ) = CustomAccessibilityAction(label) {
+                awaitingRecord = corner
+                liveRate(corner.rating)
+                true
+            }
             listOf(
-                CustomAccessibilityAction(labelAgain) {
-                    onRateCard(CardAnswer.Rating.AGAIN)
-                    true
-                },
-                CustomAccessibilityAction(labelHard) {
-                    onRateCard(CardAnswer.Rating.HARD)
-                    true
-                },
-                CustomAccessibilityAction(labelGood) {
-                    onRateCard(CardAnswer.Rating.GOOD)
-                    true
-                },
-                CustomAccessibilityAction(labelEasy) {
-                    onRateCard(CardAnswer.Rating.EASY)
-                    true
-                },
+                rateAction(labelAgain, GradeCorner.AGAIN),
+                rateAction(labelHard, GradeCorner.HARD),
+                rateAction(labelGood, GradeCorner.GOOD),
+                rateAction(labelEasy, GradeCorner.EASY),
             )
         }
     val revealActions =
-        remember(labelShowAnswer, onShowAnswer) {
+        remember(labelShowAnswer) {
             listOf(
                 CustomAccessibilityAction(labelShowAnswer) {
-                    onShowAnswer()
+                    liveShowAnswer()
                     true
                 },
             )
         }
-    // ratings need a revealed answer and a card at rest, the same rule the drag follows; a hidden card offers none
+    // ratings need an answer turned into view and a card at rest, the same rule the drag follows; a hidden card
+    // offers none
     val accessibilityActions =
         when {
             phase.isHidden -> emptyList()
             !isAnswerShown -> revealActions
-            phase == CardPhase.Idle -> ratingActions
+            phase == CardPhase.Idle && showsBackFace -> ratingActions
             else -> emptyList()
         }
 
-    val isArmed = dragToGrade && isAnswerShown && !phase.isHidden
+    val isArmed = dragToGrade && isAnswerShown && showsBackFace && !phase.isHidden
 
     // on the container, not the card: inside the card's scale and lean layers every movement arrives
     // divided by the card's size. installed once; everything it reads is live state
@@ -739,7 +795,9 @@ fun DraggableFlashcard(
         Modifier.pointerInput(Unit) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
-                if (!(liveDragToGrade && liveAnswerShown) || phase.isHidden) return@awaitEachGesture
+                // a report is only ever for a long press of this touch, which comes long after its down
+                longPressSelectedText = null
+                if (!armed() || phase.isHidden) return@awaitEachGesture
                 val cardAtDown = liveCardKey
                 // fed from the touch-down on: started at pickup, a short flick had too few samples for a
                 // speed at all, read as holding still, and the card drifted home instead of flying
@@ -784,6 +842,19 @@ fun DraggableFlashcard(
                         if (!dragging) {
                             val moved = change.position - down.position
                             if (moved.getDistance() < viewConfiguration.touchSlop) continue
+                            // a finger held still past the long-press timeout made that a long press. on text the page
+                            // selects the word under it and the moves then extend the selection, which the card followed
+                            // around; on blank card area it selects nothing, and a hold before a drag still picks the
+                            // card up. the page reports which once it has handled the press, which can be after the
+                            // finger has moved on, so until then the card waits. a webview that cannot message the app
+                            // never reports, and the card stays put after any long press
+                            if (change.uptimeMillis - down.uptimeMillis >= viewConfiguration.longPressTimeoutMillis) {
+                                when (longPressSelectedText) {
+                                    true -> return@awaitEachGesture
+                                    null -> continue
+                                    false -> Unit
+                                }
+                            }
                             // decided once, from the whole movement to the slop: judged frame by frame, one
                             // jittery sideways frame mid-scroll handed the swipe to the card. judged on the
                             // swipe's main axis, since a zoomed-in or wide page pans sideways as well
@@ -828,7 +899,7 @@ fun DraggableFlashcard(
             val aim = (currentJourney() / liveSpec.registerAt).coerceIn(0f, 1f)
             val lit =
                 when {
-                    !(liveDragToGrade && liveAnswerShown) || phase.isHidden -> null
+                    !armed() || phase.isHidden -> null
                     phase == CardPhase.Flight && isGrading -> flightCorner
                     else -> activeCorner
                 }
@@ -1042,6 +1113,7 @@ fun DraggableFlashcard(
                         onWebView = { page, alive -> keepPage(pages, 0, page, alive) { paintedFront = Long.MIN_VALUE } },
                         paintKey = cardKey,
                         onPainted = { paintedFront = it },
+                        onLongPress = { longPressSelectedText = it },
                     )
                 }
 
@@ -1081,6 +1153,7 @@ fun DraggableFlashcard(
                         onWebView = { page, alive -> keepPage(pages, 1, page, alive) { paintedBack = Long.MIN_VALUE } },
                         paintKey = cardKey,
                         onPainted = { paintedBack = it },
+                        onLongPress = { longPressSelectedText = it },
                     )
                 }
             }
@@ -1212,13 +1285,13 @@ private fun BoxScope.CornerBloom(
                     color = color.copy(alpha = 0.3f * p),
                     radius = size.minDimension * (1.05f - 0.55f * p),
                     center = focus,
-                    style = Stroke(width = 3f),
+                    style = Stroke(width = AimRingOuterStroke.toPx()),
                 )
                 drawCircle(
                     color = color.copy(alpha = 0.2f * p),
                     radius = size.minDimension * (0.7f - 0.4f * p),
                     center = focus,
-                    style = Stroke(width = 2f),
+                    style = Stroke(width = AimRingInnerStroke.toPx()),
                 )
             }
         }

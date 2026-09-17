@@ -433,7 +433,8 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
         // from playing the predictive cross-activity animation (the deck list showing behind). with
         // none enabled the system finishes the reviewer (api 31/32: the dispatcher falls back to
         // Activity.onBackPressed). the rest of closeReviewer() is covered elsewhere: onCreate sets the
-        // result, AutomaticAnswer stops on pause and VoicePlaybackViewModel.onCleared deletes the voice recording.
+        // result, AutomaticAnswer stops on pause, onDestroy stops the answer indicator's hide timer and
+        // VoicePlaybackViewModel.onCleared deletes the voice recording.
         // "press back twice" only intercepts the first back; the second one is a system back
         onBackPressedDispatcher.addCallback(this, exitViaDoubleTapBackCallback())
         super.setupBackPressedCallbacks()
@@ -523,6 +524,9 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
 
     override fun onDestroy() {
         super.onDestroy()
+        // here rather than in closeReviewer: back is left to the system, which finishes the reviewer without calling it,
+        // and the pending hide kept the destroyed activity's views alive for up to two seconds
+        previousAnswerIndicator?.stopAutomaticHide()
         if (this::server.isInitialized) {
             server.stop()
         }
@@ -887,10 +891,14 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
     }
 
     protected open fun recreateWebView() {
+        // no frame, no webview: Reviewer draws its cards in compose and never lays the card frame out (see
+        // destroyWebViewFrame, #143). a webview built for it could never be attached, yet every reload of the card
+        // (back from deck options, or a change made outside the reviewer) built one that lived for the whole session
+        val frame = cardFrame ?: return
         if (webView == null) {
             webView = createWebView()
             initializeDebugging(this.sharedPrefs())
-            cardFrame?.addView(webView)
+            frame.addView(webView)
             gestureDetectorImpl.onWebViewCreated(webView!!)
         }
         if (webView!!.visibility != View.VISIBLE) {
@@ -1512,7 +1520,6 @@ abstract class AbstractFlashcardViewer : NavigationDrawerActivity(), ViewerComma
 
     protected open fun closeReviewer(result: Int) {
         automaticAnswer.disable()
-        previousAnswerIndicator!!.stopAutomaticHide()
         this@AbstractFlashcardViewer.setResult(result)
         finish()
     }

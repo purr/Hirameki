@@ -15,12 +15,15 @@
  */
 package com.ichi2.anki
 
+import android.os.Looper
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.ichi2.anki.libanki.Consts
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.equalTo
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
+import java.time.Duration
 
 @RunWith(AndroidJUnit4::class)
 class ReviewerBackTest : RobolectricTest() {
@@ -49,6 +52,25 @@ class ReviewerBackTest : RobolectricTest() {
         reviewer.onBackPressedDispatcher.onBackPressed()
         assertThat("the second back leaves", reviewer.isFinishing, equalTo(true))
         assertThat(shadowOf(reviewer).resultCode, equalTo(AbstractFlashcardViewer.RESULT_DEFAULT))
+    }
+
+    @Test
+    fun `press back twice asks again once the notice has gone`() {
+        editPreferences { putBoolean(getResourceString(R.string.exit_via_double_tap_back_key), true) }
+        val reviewer = startReviewerWithACard()
+
+        reviewer.onBackPressedDispatcher.onBackPressed()
+        assertThat("the first back lets the next one through", reviewer.onBackPressedDispatcher.hasEnabledCallbacks(), equalTo(false))
+
+        // the second back must follow within the notice: the passing test above could not tell a callback that
+        // stands down for the notice from one that never stands up again, which would make every later back leave
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(Consts.SHORT_TOAST_DURATION))
+        assertThat("armed again once the notice has gone", reviewer.onBackPressedDispatcher.hasEnabledCallbacks(), equalTo(true))
+
+        reviewer.onBackPressedDispatcher.onBackPressed()
+        assertThat("a late second back is a first back again", reviewer.isFinishing, equalTo(false))
+        reviewer.onBackPressedDispatcher.onBackPressed()
+        assertThat("and the back after it leaves", reviewer.isFinishing, equalTo(true))
     }
 
     /** an empty collection closes the reviewer by itself (RESULT_NO_MORE_CARDS), before back is pressed */

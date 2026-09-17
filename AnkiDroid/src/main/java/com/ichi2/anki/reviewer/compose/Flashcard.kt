@@ -18,7 +18,6 @@ package com.ichi2.anki.reviewer.compose
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
-import android.graphics.Color
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ViewGroup
@@ -45,6 +44,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -68,6 +68,14 @@ import com.ichi2.utils.toRGBHex
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 
+/** Name of the object the page reports long presses through; see [listenToPage]. */
+@VisibleForTesting
+internal const val LONG_PRESS_BRIDGE = "hiramekiLongPress"
+
+/** What the page reports for a long press that selected text. Any other report is a long press that selected nothing. */
+@VisibleForTesting
+internal const val LONG_PRESS_SELECTED = "selected"
+
 /**
  * Script loaded once into the page shell, beside the reviewer's own.
  *
@@ -82,6 +90,13 @@ import timber.log.Timber
  *
  * Replay buttons: a tapped button is marked playing until the app reports the sound has finished,
  * through `window.hiramekiAudioStopped`, because the page itself never hears the native player.
+ *
+ * Text fit: a card taller than its page shrinks its text before it has to scroll, through
+ * `window.hiramekiFitText`, which [runShow] queues behind every show, so it measures the card after
+ * reviewer.js has typeset it and in the same task that makes it visible. See the script's own notes.
+ *
+ * Long presses: the page tells the app, through [LONG_PRESS_BRIDGE], whether a long press selected text,
+ * which only the page knows. See the script's own notes.
  *
  * Lives in the shell rather than the style block: a style block swapped in via outerHTML would
  * carry a script that never runs.
@@ -143,17 +158,177 @@ private const val HIRAMEKI_PAGE_SCRIPT = """
             for (var i = 0; i < playing.length; i++) playing[i].classList.remove('hirameki-playing');
         }
         window.hiramekiAudioStopped = clearPlaying;
+
+        // text fit. a card taller than its page shrinks its text before it has to scroll. the supporting text (the size
+        // most of the card's text is set in, and anything not clearly larger: sentences, extra fields, the answer,
+        // furigana) gives way first, down to FIT_SUPPORT_SCALE of the size the deck gave it. the main word, text set
+        // clearly larger than that, gives way only after that, and only when that makes the card fit: down to
+        // FIT_MAIN_SCALE, never below the supporting text's own size. a card that fits at no size these allow scrolls
+        // at the deck's own sizes: shrunk, it would only scroll a little less, and a card taller than its page for
+        // another reason (an image, a deck's min-height) not at all. nothing grows past the deck's own size, and every
+        // fit starts again from the deck's sizes, so a card that gets more room gets its text back
+        var FIT_SUPPORT_SCALE = 0.85;
+        var FIT_MAIN_SCALE = 0.7;
+        // css px no text is shrunk below; text a deck already set smaller keeps its size
+        var FIT_MIN_PX = 16;
+        // text at least this many times the body size counts as the main word. measured from the body, not from the
+        // largest text: a card set all in one size plus a small note or furigana made its whole body the main word,
+        // which then shrank past the supporting text's floor
+        var FIT_MAIN_RATIO = 1.15;
+        // halvings of the search between a floor and full size: 6 lands within 0.5% of the best scale
+        var FIT_STEPS = 6;
+        // sized by rules of their own: math is typeset in ems of the text around it and follows it, and form
+        // controls, media and replay buttons keep the size the page gave them
+        var FIT_SKIP = 'mjx-container, mjx-container *, math, math *, svg, svg *, .replay-button, .replay-button *, ' +
+            'button, button *, input, select, textarea, img, video, audio, canvas, iframe, br, hr, script, style';
+        var fitted = [];
+        function inlineOf(node, property) {
+            return { value: node.style.getPropertyValue(property), priority: node.style.getPropertyPriority(property) };
+        }
+        function putBack(node, property, inline) {
+            if (inline.value) node.style.setProperty(property, inline.value, inline.priority);
+            else node.style.removeProperty(property);
+        }
+        function unfit() {
+            for (var i = 0; i < fitted.length; i++) {
+                putBack(fitted[i].node, 'font-size', fitted[i].fontSize);
+                putBack(fitted[i].node, 'line-height', fitted[i].lineHeight);
+            }
+            fitted = [];
+        }
+        function overflows() {
+            var root = document.documentElement;
+            return root.scrollHeight > root.clientHeight;
+        }
+        // set by the style block only in the hirameki css mode that sets font sizes: a user who switched font size
+        // changes off, or all hirameki css, keeps every card at exactly the sizes its deck gives it
+        function fitAllowed() {
+            return getComputedStyle(document.documentElement).getPropertyValue('--hirameki-fit').trim() === '1';
+        }
+        function ownTextLength(node) {
+            var length = 0;
+            for (var child = node.firstChild; child; child = child.nextSibling) {
+                if (child.nodeType === 3) length += child.nodeValue.trim().length;
+            }
+            return length;
+        }
+        // every entry gets an explicit size, changed or not: one left to inherit would follow a shrunk parent
+        // through its em size, past its own floor
+        function sizeTo(supportScale, mainScale) {
+            for (var i = 0; i < fitted.length; i++) {
+                var entry = fitted[i];
+                var px = Math.max(entry.size * (entry.main ? mainScale : supportScale), entry.floor);
+                entry.node.style.setProperty('font-size', px + 'px', 'important');
+                // a line height in px keeps its proportion, or shrunk text would keep the old lines' height
+                if (entry.line) entry.node.style.setProperty('line-height', entry.line * px / entry.size + 'px', 'important');
+            }
+        }
+        // the card fits with apply(floor) and not with apply(1): settles on the largest scale between them that fits
+        function largestFitting(floor, apply) {
+            var low = floor, high = 1;
+            for (var step = 0; step < FIT_STEPS; step++) {
+                var middle = (low + high) / 2;
+                apply(middle);
+                if (overflows()) high = middle; else low = middle;
+            }
+            apply(low);
+        }
+        function fitText() {
+            unfit();
+            var qa = document.getElementById('qa');
+            // never in a css mode that leaves font sizes to the deck; nothing to measure before the page is laid out; and
+            // not on image occlusion, whose image and masks its own script sizes to the page
+            if (!qa || !fitAllowed() || document.documentElement.clientHeight <= 0 || !overflows() ||
+                qa.querySelector('#image-occlusion-container')) return;
+            var nodes = [qa].concat(Array.prototype.slice.call(qa.querySelectorAll('*')));
+            // characters of visible text at each size; text the deck hides has no say in which size is which
+            var charsAt = {};
+            for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                if (node !== qa && node.matches(FIT_SKIP)) continue;
+                var style = getComputedStyle(node);
+                var size = parseFloat(style.fontSize);
+                if (!(size > 0)) continue;
+                var chars = node.getClientRects().length > 0 ? ownTextLength(node) : 0;
+                if (chars) charsAt[size] = (charsAt[size] || 0) + chars;
+                fitted.push({
+                    node: node,
+                    size: size,
+                    text: chars > 0,
+                    // 0 for a 'normal' line height, which follows the font size by itself
+                    line: parseFloat(style.lineHeight) || 0,
+                    fontSize: inlineOf(node, 'font-size'),
+                    lineHeight: inlineOf(node, 'line-height')
+                });
+            }
+            // the body size is the one most of the card's text is set in
+            var body = 0, most = 0;
+            for (var key in charsAt) {
+                if (charsAt[key] > most) {
+                    most = charsAt[key];
+                    body = parseFloat(key);
+                }
+            }
+            if (!body) return unfit();
+            // on a card with no text clearly larger than its body there is no main word: all of its text is supporting
+            var hasMain = false, mainFloor = FIT_MIN_PX;
+            for (var j = 0; j < fitted.length; j++) {
+                fitted[j].main = fitted[j].size >= body * FIT_MAIN_RATIO;
+                if (!fitted[j].text) continue;
+                if (fitted[j].main) hasMain = true;
+                else mainFloor = Math.max(mainFloor, fitted[j].size);
+            }
+            for (var k = 0; k < fitted.length; k++) {
+                if (!hasMain) fitted[k].main = false;
+                fitted[k].floor = Math.min(fitted[k].size, fitted[k].main ? mainFloor : FIT_MIN_PX);
+            }
+            sizeTo(FIT_SUPPORT_SCALE, 1);
+            if (!overflows()) return largestFitting(FIT_SUPPORT_SCALE, function (scale) { sizeTo(scale, 1); });
+            if (hasMain) {
+                sizeTo(FIT_SUPPORT_SCALE, FIT_MAIN_SCALE);
+                if (!overflows()) return largestFitting(FIT_MAIN_SCALE, function (scale) { sizeTo(FIT_SUPPORT_SCALE, scale); });
+            }
+            // no size the rules allow makes the card fit, so it scrolls at the deck's own sizes
+            unfit();
+        }
+        var fitPending = false;
+        // before the next paint: resize and animation frame callbacks both run ahead of it
+        function scheduleFit() {
+            if (fitPending) return;
+            fitPending = true;
+            requestAnimationFrame(function () { fitPending = false; fitText(); });
+        }
+        window.hiramekiFitText = fitText;
+
         function start() {
             recolour();
             // cards arrive by replacing the page content, so watch for it; attributes are not
             // watched, which keeps the recolouring itself from re-triggering the observer
             new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, characterData: true });
+            window.addEventListener('resize', scheduleFit);
+            // an image or a font that arrives after its card was shown changes how tall the card is
+            document.addEventListener('load', function (event) {
+                if (event.target && event.target.tagName === 'IMG') scheduleFit();
+            }, true);
+            if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', scheduleFit);
             document.addEventListener('click', function (event) {
                 var button = event.target && event.target.closest && event.target.closest('.replay-button');
                 if (!button) return;
                 // one sound at a time: a new tap takes the playing state from any other button
                 clearPlaying();
                 button.classList.add('hirameki-playing');
+            }, true);
+            // long press. chromium answers one by selecting the word under it, when there is one, and then fires
+            // contextmenu, on blank card area too. the app hears whether the press selected text: the moves after it then
+            // extend the selection, and must not drag the card along. a selection an earlier press left does not count,
+            // only one this press started
+            var pressSelected = false;
+            window.addEventListener('pointerdown', function () { pressSelected = false; }, true);
+            window.addEventListener('selectstart', function () { pressSelected = true; }, true);
+            window.addEventListener('contextmenu', function () {
+                var selection = window.getSelection();
+                var selected = pressSelected && selection && !selection.isCollapsed;
+                if (window.$LONG_PRESS_BRIDGE) $LONG_PRESS_BRIDGE.postMessage(selected ? '$LONG_PRESS_SELECTED' : 'none');
             }, true);
         }
         if (document.readyState === 'loading') {
@@ -222,8 +397,9 @@ private fun interactiveAtPointScript(
     })()
     """.trimIndent()
 
-/** Name of the object the page reports finished shows through; see [listenForPaints]. */
-private const val PAINT_BRIDGE = "hiramekiPaint"
+/** Name of the object the page reports finished shows through; see [listenToPage]. */
+@VisibleForTesting
+internal const val PAINT_BRIDGE = "hiramekiPaint"
 
 /** Marks the fade [fadeInScript] plays, so [CANCEL_FADE_SCRIPT] stops that and never a card's own animation. */
 private const val FADE_ID = "hirameki-fade"
@@ -271,6 +447,12 @@ private fun fadeInScript(millis: Int) =
         "qa.animate([{ opacity: 0 }, { opacity: 1 }], { duration: $millis, easing: 'ease-out', id: '$FADE_ID' }); });"
 
 /**
+ * Fits the card's text to its page (see [HIRAMEKI_PAGE_SCRIPT]), queued behind a show: reviewer.js makes the card
+ * visible at the end of the show, after typesetting its math, and this runs in that same task, before the page paints.
+ */
+private val FIT_TEXT_SCRIPT = queuedScript("window.hiramekiFitText && window.hiramekiFitText();")
+
+/**
  * Sends the page's current show to reviewer.js, which swaps it in once its fonts and images are loaded,
  * and asks the page to report when it has. A [newCard] starts at the top of the page.
  */
@@ -285,7 +467,7 @@ private fun runShow(
     val fade = if (fadeMillis > 0) fadeInScript(fadeMillis) else ""
     // marked last: in a document without reviewer.js the first call throws, so such a document is never marked
     val script =
-        "$CANCEL_FADE_SCRIPT\n$scroll\n${payload.evalScript}\n$fade\n" +
+        "$CANCEL_FADE_SCRIPT\n$scroll\n${payload.evalScript}\n$FIT_TEXT_SCRIPT\n$fade\n" +
             "${paintReportScript(payload.showSeq)}\nwindow.$SHOWN_MARK = true;"
     webView.evaluateJavascript(script, null)
 }
@@ -303,33 +485,37 @@ private fun runCommand(
 }
 
 /**
- * Hears the page report a finished show and tells [onPainted] once that state will be on the next draw, with the
+ * Hears what the page reports. A finished show: [onPainted] is told once that state will be on the next draw, with the
  * show's paint key and [showId]. The page's word is not enough: DOM changes reach the screen asynchronously, and
- * postVisualStateCallback is the platform's promise that the next draw shows them.
+ * postVisualStateCallback is the platform's promise that the next draw shows them. A long press: [onLongPress] is told
+ * whether it selected text.
  */
-private fun listenForPaints(
+private fun listenToPage(
     webView: WebView,
     baseUrl: String,
     onPainted: (paintKey: Long, show: Int) -> Unit,
+    onLongPress: (selectedText: Boolean) -> Unit,
 ) {
     // lint's RequiresFeature check did not follow an early return here, so the listener calls sit in a helper that
     // only runs once this check has passed
     if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-        Timber.w("Flashcard: webview cannot message the app; the card view falls back to its paint timeout")
+        Timber.w("Flashcard: webview cannot message the app; the card view waits out paint timeouts and long presses")
     } else {
-        registerPaintListener(webView, baseUrl, onPainted)
+        registerPageListeners(webView, baseUrl, onPainted, onLongPress)
     }
 }
 
-@SuppressLint("RequiresFeature") // only called from listenForPaints, after its WEB_MESSAGE_LISTENER check
-private fun registerPaintListener(
+@SuppressLint("RequiresFeature") // only called from listenToPage, after its WEB_MESSAGE_LISTENER check
+private fun registerPageListeners(
     webView: WebView,
     baseUrl: String,
     onPainted: (paintKey: Long, show: Int) -> Unit,
+    onLongPress: (selectedText: Boolean) -> Unit,
 ) {
     val uri = baseUrl.toUri()
     // a new document re-registers; removing an absent listener is a no-op
     WebViewCompat.removeWebMessageListener(webView, PAINT_BRIDGE)
+    WebViewCompat.removeWebMessageListener(webView, LONG_PRESS_BRIDGE)
     val origin = "${uri.scheme}://${uri.encodedAuthority}"
     WebViewCompat.addWebMessageListener(webView, PAINT_BRIDGE, setOf(origin)) { view, message, _, isMainFrame, _ ->
         // a card's own iframe can share the origin; only the page itself reports shows
@@ -352,6 +538,11 @@ private fun registerPaintListener(
                 }
             },
         )
+    }
+    WebViewCompat.addWebMessageListener(webView, LONG_PRESS_BRIDGE, setOf(origin)) { _, message, _, isMainFrame, _ ->
+        // as for show reports: the page itself, and a string only, since reading data() on an arraybuffer throws
+        if (!isMainFrame || message.type != WebMessageCompat.TYPE_STRING) return@addWebMessageListener
+        onLongPress(message.data == LONG_PRESS_SELECTED)
     }
 }
 
@@ -385,7 +576,7 @@ fun Flashcard(
      * Page background, so the card html matches the surface it is drawn on. Defaults to the theme
      * surface; a card face passes its own container tone.
      */
-    pageColor: androidx.compose.ui.graphics.Color? = null,
+    pageColor: Color? = null,
     /**
      * Counts replay taps that have finished playing. Each change tells the page to restore its dimmed
      * replay button; a count rather than an on/off flag, because a sound that starts and stops within
@@ -404,6 +595,8 @@ fun Flashcard(
     paintKey: Long = 0L,
     /** Told the [paintKey] of content the page has actually drawn, not merely been sent. */
     onPainted: (paintKey: Long) -> Unit = {},
+    /** Told, once the page has handled a long press, whether that press selected text, whose moves then extend it. */
+    onLongPress: (selectedText: Boolean) -> Unit = {},
 ) {
     val currentBaseUrl by rememberUpdatedState(baseUrl)
     val currentOnJavascriptCommandConsumed by rememberUpdatedState(onJavascriptCommandConsumed)
@@ -411,6 +604,7 @@ fun Flashcard(
     val currentOnTap by rememberUpdatedState(onTap)
     val currentOnWebView by rememberUpdatedState(onWebView)
     val currentOnPainted by rememberUpdatedState(onPainted)
+    val currentOnLongPress by rememberUpdatedState(onLongPress)
 
     val context = LocalContext.current
     val sharedPrefs = remember(context) { context.sharedPrefs() }
@@ -492,12 +686,15 @@ fun Flashcard(
         if (applyHiramekiCssMode == Prefs.HIRAMEKI_CSS_DISABLED) {
             """<style id="compose-styles"></style>"""
         } else {
+            // one answer for the side sizes below and for the page script's text fit, which changes font sizes too
+            val setsFontSizes = applyHiramekiCssMode != Prefs.HIRAMEKI_CSS_NO_FONT_SIZE
+
             fun sideType(
                 style: TextStyle,
                 paddingTop: Int,
             ): String {
                 val size =
-                    if (applyHiramekiCssMode == Prefs.HIRAMEKI_CSS_NO_FONT_SIZE) {
+                    if (!setsFontSizes) {
                         ""
                     } else {
                         "font-size: ${style.fontSize.value}px; line-height: ${style.lineHeight.value}px; " +
@@ -688,9 +885,11 @@ fun Flashcard(
                 body.card .replay-button .play-action path {
                     fill: currentColor;
                 }
-                /* read by the page script, which repaints a deck's blue text in the theme accent */
+                /* read by the page script, which repaints a deck's blue text in the theme accent, and fits a card's
+                   text to its page only where the fit flag is set */
                 :root {
                     --hirameki-primary: $primaryColorHex;
+                    ${if (setsFontSizes) "--hirameki-fit: 1;" else ""}
                 }
                 /* a replay button stays dimmed for exactly as long as its sound plays */
                 body.card .replay-button.hirameki-playing {
@@ -703,7 +902,8 @@ fun Flashcard(
     val styledHtml = remember(context, isNightMode, composeStyle) {
         buildStyledHtml(context, isNightMode, composeStyle)
     }
-    val hasImageOcclusion = currentHtml.contains("image-occlusion-container")
+    // a scan of the whole card html: once per html, not on every recomposition
+    val hasImageOcclusion = remember(currentHtml) { currentHtml.contains("image-occlusion-container") }
     val sideToken = remember(contentKey, isAnswerShown) {
         "${contentKey.hashCode()}_${isAnswerShown}".hashCode().toString(16)
     }
@@ -732,8 +932,9 @@ fun Flashcard(
 
     val pageModifier = modifier
         .fillMaxSize()
-        // match the page, so a card face never shows a band of the wrong tone while loading
-        .background(pageColor ?: MaterialTheme.colorScheme.surface)
+        // match the page, so a card face never shows a band of the wrong tone while loading. the colour the style block
+        // paints the page with, read from the one place, so the two tones cannot drift apart
+        .background(surfaceColor)
     if (stalledShow == show) {
         // only the page's tone: a webview would crash its renderer once more, and with it every other page on that
         // renderer. the effect above lifts the stall
@@ -897,7 +1098,7 @@ fun Flashcard(
                     false
                 }
 
-                setBackgroundColor(Color.TRANSPARENT)
+                setBackgroundColor(Color.Transparent.toArgb())
                 currentOnWebView(this, true)
             }
         }, update = { webView ->
@@ -921,12 +1122,22 @@ fun Flashcard(
                         evalScript,
                         paintKey,
                         pendingJavascriptCommand = newCommand,
+                        // seeded from the props they track: left at their defaults, a page made after replays had
+                        // finished, or made for a face turned away, saw a change on its first update and sent the
+                        // page a replay restore and a media pause before the shell had even loaded
+                        replayFinished = replayFinished,
+                        showing = isShowing,
                     )
-                    listenForPaints(webView, baseUrl) { paintedKey, drawnShow ->
-                        // drawn, the show works: a later crash is no crash loop, so it gets a rebuild, not a stall (#143)
-                        if (crashedShow == drawnShow) crashedShow = null
-                        currentOnPainted(paintedKey)
-                    }
+                    listenToPage(
+                        webView,
+                        baseUrl,
+                        onPainted = { paintedKey, drawnShow ->
+                            // drawn, the show works: a later crash is no crash loop, so it gets a rebuild, not a stall (#143)
+                            if (crashedShow == drawnShow) crashedShow = null
+                            currentOnPainted(paintedKey)
+                        },
+                        onLongPress = { currentOnLongPress(it) },
+                    )
                     loadShell(webView, baseUrl, styledHtml)
                 }
                 // still loading: onPageFinished runs the latest of each
@@ -1125,6 +1336,8 @@ private fun buildShellUpdateScript(
             const s = document.getElementById('compose-styles');
             if (s) s.outerHTML = $cssLiteral;
         }
+        // the style decides the card's room (the answer bar's height is part of it), so the text is fitted again
+        window.hiramekiFitText && window.hiramekiFitText();
     """.trimIndent()
 }
 
