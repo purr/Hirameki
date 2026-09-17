@@ -35,7 +35,8 @@ This project is currently in **active development** and is available on Google P
 - **Expressive Motion**: Smooth, intentional animations for a more fluid experience.
 - **Modernized Layouts**: Focused on the latest Android design standards.
 - **AnkiWeb Compatibility**: Built on the robust core of AnkiDroid, maintaining sync compatibility with AnkiWeb and the [FSRS algorithm](https://github.com/open-spaced-repetition).
-- **Card View Reviewer**: Study with a physical-feeling card: tap to flip it, then drag or flick it into a corner to grade (Again, Hard, Good, Easy). Each part can be switched off in Settings > Reviewing > Card view.
+- **Card View Reviewer**: Study with a physical-feeling card: tap to flip it, then drag or flick it into a corner to grade (Again, Hard, Good, Easy). Each part can be switched off in Settings > Reviewing > Card view. A card too long for the screen shrinks its text a little before it scrolls, and its main word stays the largest.
+- **Deck Options**: The deck options page follows your Material You colours, and number fields have − and + buttons (hold to repeat).
 - **Predictive Back**: Back gestures preview the screen you are returning to, and back closes drawers, selections and searches first.
 - **Arabic-Script Font**: Arabic, Persian, Urdu and Kurdish text uses [Vazirmatn](https://github.com/rastikerdar/vazirmatn) instead of the system's print font, in the app and on cards. Toggle it in Settings > Appearance > Themes.
 
@@ -74,7 +75,7 @@ The **📦 Build & Release APK** workflow builds signed APKs on GitHub and publi
 5. Open **Actions → 📦 Build & Release APK → Run workflow**. Pushing a tag such as `v1.2.0` starts the same build.
 6. When the run finishes, download the APK from the **Releases** page of your fork. If unsure, take the `universal` APK; `arm64-v8a` is smaller and fits almost every current phone.
 
-The release tag defaults to `v` + `baseVersionName` from `AnkiDroid/build.gradle.kts`. A pushed tag has to be exactly that — the APKs carry `baseVersionName` whatever the tag says — so to release a new version, bump `baseVersionName` and `baseVersionCode` and tag that commit; any other tag name has to go through the **Run workflow** form. Missing secrets, a wrong keystore password, a mismatched tag and an already-released tag all stop the run within seconds, before the long build starts — so if that tag already exists, bump `baseVersionName` or type a different tag in the **Run workflow** form. The first build is the slowest; later builds on your default branch reuse the Gradle cache.
+The release tag defaults to `v` + `baseVersionName` from `AnkiDroid/build.gradle.kts`. A pushed tag has to be exactly that — the APKs carry `baseVersionName` whatever the tag says — so to release a new version, bump `baseVersionName` and `baseVersionCode` and tag that commit; any other tag name has to go through the **Run workflow** form. Missing secrets, a wrong keystore password, a mismatched tag and an already-released tag all stop the run within seconds, before the unit tests and the long build start — so if that tag already exists, bump `baseVersionName` or type a different tag in the **Run workflow** form. The unit tests run next to the build, and the release is published only if every test passes; if one fails, the signed APKs stay downloadable from the run page for 7 days. The first build is the slowest; later builds on your default branch reuse the Gradle cache.
 
 These APKs are signed with your key, not Google Play's, so Android will not install them over the Play Store version. Uninstall that first, after syncing or backing up your collection.
 

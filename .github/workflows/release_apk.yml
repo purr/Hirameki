@@ -26,25 +26,26 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write # create the tag and the release
+  contents: read # only the publish job can write: it creates the tag and the release
 
 jobs:
-  release:
-    name: Build & Release
-    # pinned image: android sdk 37, build-tools, jq and gh come preinstalled
+  # the checks that take seconds, in a job of their own that the tests and the build wait for. a failed job does not
+  # stop the jobs running next to it, so if these checks ran inside the build job, a bad tag or bad secrets would still
+  # leave the tests running for 10+ minutes, and a corrected run would queue behind that doomed one (see concurrency)
+  preflight:
+    name: Check tag and signing key
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      # actions are pinned to commit shas because this job holds the signing key,
-      # so a moved tag can't swap in different code. dependabot keeps the pins current.
+      # pinned to commit shas for the reason given in the build job: this job holds the signing key too
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # keep the token out of .git/config, where gradle plugins could read it
           persist-credentials: false
 
-      # everything up to "set up gradle" takes seconds, so a bad tag or bad secrets
-      # fail right away instead of after the build
       - name: Resolve release tag
         id: release
         env:
@@ -128,13 +129,17 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      # jar and jarsigner for the signing key probe
       - name: Set up JDK
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: "21" # same as the other workflows and jitpack.yml
+          java-version: "21"
 
-      - name: Load signing key
+      # the build job runs this same step through its alias, since it needs the key file and the one decoded here
+      # goes away with this job's runner
+      - &load-signing-key
+        name: Load signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -174,6 +179,75 @@ jobs:
           # read by signingConfigs.release in AnkiDroid/build.gradle.kts
           echo "KEYSTOREPATH=$keystore" >> "$GITHUB_ENV"
 
+  # the same unit test suites the "unit tests" workflow runs on every push, so a commit with a failing test is never
+  # published. it runs next to the build, not before it: a release waits about as long as the tests take (10 to 12
+  # minutes on ubuntu, against about 7 for the build), not tests plus build. no secrets reach this job
+  unit-tests:
+    name: Unit tests
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # read-only everywhere: with no entry of its own, setup-gradle restores the newest ubuntu entry, such as the one
+      # the unit tests workflow saves on the default branch, and one more saved copy could push the build's own entry
+      # out of the repository's cache quota
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: true
+
+      # robolectric would fetch its android sdk jars during the tests; fetching them first through gradle, as the
+      # unit tests workflow does, takes them from the gradle cache when it has them. three tries 60 s apart like that
+      # workflow's retry action, written out so no other third-party action needs pinning: one dropped download would
+      # otherwise fail the tests and skip the release
+      - name: Download Robolectric SDKs
+        run: |
+          for attempt in 1 2 3; do
+            ./gradlew robolectricSdkDownload && exit 0
+            echo "::warning::robolectric sdk download failed (attempt $attempt of 3)"
+            [ "$attempt" = 3 ] || sleep 60
+          done
+          exit 1
+
+      - name: Run unit tests
+        run: ./gradlew :AnkiDroid:testPlayDebugUnitTest :libanki:testDebugUnitTest :common:testDebugUnitTest
+
+  release:
+    name: Build APKs
+    needs: preflight
+    # pinned image: android sdk 37, build-tools, jq and gh come preinstalled
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      # actions are pinned to commit shas because this job holds the signing key, so a moved tag can't swap in
+      # different code. dependabot (.github/dependabot.yml) keeps the pins current once version updates are
+      # enabled; a fork starts with them off
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # keep the token out of .git/config, where gradle plugins could read it
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21" # same as the other workflows and jitpack.yml
+
+      # the key file preflight decoded went away with its runner, so this job loads and checks it again
+      - *load-signing-key
+
       # caches downloaded dependencies, the gradle distribution and the build cache.
       # runs on the default branch save the cache; runs on tags and other branches
       # only read it, because github scopes caches they save to their own ref.
@@ -186,7 +260,6 @@ jobs:
       # for google play policy (AnkiDroid/src/play/AndroidManifest.xml).
       # -Duniversal-apk=true adds one apk for every device next to the per-abi apks.
       - name: Build APKs
-        id: build
         env:
           KEYSTOREPWD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEYALIAS: ${{ secrets.KEY_ALIAS }}
@@ -195,7 +268,7 @@ jobs:
 
       - name: Collect APKs
         env:
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           out=AnkiDroid/build/outputs/apk/full/release
           apksigner=$(printf '%s\n' "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
@@ -230,12 +303,41 @@ jobs:
           fi
           ls -l dist
 
+      # hands the apks to the publish job, and keeps them downloadable from the run page when the tests or
+      # publishing fail, so a long build is never lost
+      - name: Upload APKs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apks-${{ github.run_id }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0 # apks and the gzipped mapping are compressed already
+          # artifact names are unique per run, not per attempt, so "re-run all jobs" would otherwise fail here
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    # publishes only when the build and every unit test passed. preflight is listed for its tag and version: a job can
+    # only read the outputs of the jobs it names here
+    needs: [preflight, release, unit-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the tag and the release
+    steps:
+      - name: Download APKs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: apks-${{ github.run_id }}
+          path: dist
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           assets=()
           for apk in dist/*.apk; do
@@ -264,7 +366,7 @@ jobs:
           EOF
 
           # a folded list of the commit titles since the last release, so the notes say what changed without
-          # growing long. read from the api, not from git: this checkout is shallow and carries no tags
+          # growing long. read from the api, not from git: this job has no checkout
           prev=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>/dev/null || true)
           if [ -n "$prev" ] && [ "$prev" != "$TAG" ]; then
             titles=$(gh api "repos/$GH_REPO/compare/$prev...$GITHUB_SHA" \
@@ -288,14 +390,3 @@ jobs:
           # a tag created with github.token triggers no workflows, so this starts no second run
           url=$(gh release create "$TAG" "${assets[@]}" --target "$GITHUB_SHA" --title "Hirameki $VERSION" --notes-file "$RUNNER_TEMP/notes.md")
           echo "Release: $url" >> "$GITHUB_STEP_SUMMARY"
-
-      # the build took long; if publishing failed, the apks stay downloadable from the run page
-      - name: Keep APKs when publishing fails
-        if: failure() && steps.build.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: apks-${{ github.run_id }}
-          path: |
-            AnkiDroid/build/outputs/apk/full/release/*.apk
-            AnkiDroid/build/outputs/mapping/fullRelease/mapping.txt
-          retention-days: 7
