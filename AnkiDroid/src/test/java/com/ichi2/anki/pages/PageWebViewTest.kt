@@ -39,8 +39,12 @@ import org.json.JSONObject
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.atLeastOnce
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
 import org.robolectric.Shadows.shadowOf
 
 @RunWith(AndroidJUnit4::class)
@@ -83,13 +87,30 @@ class PageWebViewTest : RobolectricTest() {
 
         composeTestRule.runOnIdle { shadowOf(page).webViewClient.onPageFinished(page, "${BASE_URL}deck-options/1") }
 
-        // the client evaluates its theme, then the motion script, then the steppers; robolectric keeps only the last
+        // the client evaluates its theme, then the motion and revert scripts, then the steppers; robolectric
+        // keeps only the script evaluated last
         val script = shadowOf(page).lastEvaluatedJavascript
         // the name anki_material3_steppers.js reads its labels from, which it needs before it adds any button
         assertThat(script, containsString("window.ankiMaterial3StepperLabels = "))
         assertThat(script, containsString(JSONObject.quote(TR.actionsDecrementValue())))
         assertThat(script, containsString(JSONObject.quote(TR.actionsIncrementValue())))
         assertThat("the asset follows its labels", script, containsString("const labels = window.ankiMaterial3StepperLabels;"))
+    }
+
+    @Test
+    fun `a loaded page is given the one-tap restore, worded in the ui language`() {
+        // a mock of the webview, not the composed one: robolectric's remembers only the script it evaluated
+        // last, and this one is not it
+        val webView = mock<WebView> { on { context } doReturn ContextThemeWrapper(targetContext, Theme.LIGHT.resId) }
+
+        PageWebViewClient().onPageFinished(webView, "${BASE_URL}deck-options/1")
+
+        val scripts = argumentCaptor<String>()
+        verify(webView, atLeastOnce()).evaluateJavascript(scripts.capture(), anyOrNull())
+        // the name anki_material3_revert.js reads the restore's spoken name from, the badge's only name
+        val script = scripts.allValues.single { "window.ankiMaterial3RevertLabel = " in it }
+        assertThat(script, containsString(JSONObject.quote(TR.deckConfigRevertButtonTooltip())))
+        assertThat("the asset follows its label", script, containsString("const label = window.ankiMaterial3RevertLabel;"))
     }
 
     private fun showPage() {

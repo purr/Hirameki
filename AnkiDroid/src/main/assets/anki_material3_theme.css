@@ -427,6 +427,15 @@ body:has(.deck-options-page) .sticky-container .select-container .chevron {
     color: var(--m3-on-surface-variant);
 }
 
+/* a tap on the badge restores the default itself (anki_material3_revert.js): it presses the item of the
+   one-item menu anki hangs the restore off, inside the tap's own task. the script wears this mark for
+   the microtasks it waits on a menu anki has yet to render, which nothing paints between, and this keeps
+   that menu out of layout and out of the enter animation while it is in the document. scoped like the
+   script, which looks for no row around a badge, so that every menu it opens is a menu this hides */
+body:has(.deck-options-page) .revert[data-m3-restoring] .floating {
+    display: none;
+}
+
 /* keep the value clear of a shown revert icon */
 .deck-options-page .row-columns .dynamically-slottable .config-input:has(> .revert > :not(.hide) > .badge) > .spin-box input,
 .deck-options-page .row-columns .dynamically-slottable .config-input:has(> .revert > :not(.hide) > .badge) > input,
@@ -1197,6 +1206,29 @@ body:has(.deck-options-page) .popover.m3-exit:not(.hidden) {
     animation: m3-scale-in var(--m3-exit-duration) var(--m3-exit-easing) reverse forwards;
 }
 
+/* the field a tap on the revert badge has just put the default back into: a tonal wash that fades off
+   it, on the exit curve so it is seen before it goes. the badge disappearing is the page's own answer,
+   but it disappears under the finger that tapped it, so this is what the restore is seen by.
+   anki_material3_revert.js marks the field and asks the same reduced-motion question this file does,
+   so with motion off a restore is instant and unmarked */
+@keyframes m3-restore-flash {
+    from {
+        opacity: 0.4;
+    }
+}
+
+.deck-options-page .row-columns .dynamically-slottable .config-input[data-m3-restored]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0; /* over the field, under the 40px badge (z-index 1) while it is still there */
+    border-radius: 16px; /* the fields' own */
+    background: var(--m3-secondary-container);
+    opacity: 0;
+    pointer-events: none;
+    animation: m3-restore-flash 400ms var(--m3-exit-easing);
+}
+
 /* help chapters: upstream slides the pages sideways, because anki hands .carousel-item
    `transition: var(--transition)`, which is every property, transform included, over 180ms.
    with no transition bootstrap's wait drops to its 5ms floor: the page swaps at once, in
@@ -1255,8 +1287,10 @@ body:has(.deck-options-page) #nav button:active {
     background-image: linear-gradient(color-mix(in srgb, currentColor 10%, transparent) 0 0);
 }
 
-/* keyboard focus */
+/* keyboard focus. the revert badge is in the tab order since a tap on it restores the default itself
+   (anki_material3_revert.js); upstream left it out, along with the menu item it used to open */
 .deck-options-page .row-columns .dynamically-slottable .btn:focus-visible,
+.deck-options-page .row-columns .dynamically-slottable .revert .badge:focus-visible,
 .deck-options-page .row-columns .dynamically-slottable .form-switch .form-check-input:focus-visible,
 body:has(.deck-options-page) .modal-footer .btn:focus-visible,
 body:has(.deck-options-page) .btn-close:focus-visible,

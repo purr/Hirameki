@@ -493,16 +493,21 @@ open class PageWebViewClient : WebViewClient() {
     }
 
     /**
-     * Runs what [MATERIAL3_THEME_CSS_ASSET] cannot do alone. Both scripts scope themselves to the
-     * deck options page, the only page the stylesheet's rules for them cover, and are no-ops on the
-     * others:
+     * Runs what [MATERIAL3_THEME_CSS_ASSET] cannot do alone. Every script scopes itself to the deck
+     * options page, the only page the stylesheet's rules for them cover, and is a no-op on the others:
      * - [MATERIAL3_MOTION_JS_ASSET] gives the page's popups their exit motion: their nodes leave the
      *   document in the frame the close starts, so it puts each back for one exit animation
+     * - [MATERIAL3_REVERT_JS_ASSET] makes a tap on a setting's revert badge restore its default, which
+     *   upstream asks for a second tap in a one-item menu for
      * - [MATERIAL3_STEPPERS_JS_ASSET] adds - and + buttons to the number fields, whose own step
      *   buttons anki renders only when the user agent is not android
      */
     private fun applyMaterial3Scripts(webView: WebView) {
         evaluateScriptAsset(webView, MATERIAL3_MOTION_JS_ASSET)
+        // the same translated words the menu item the script presses carries, which is the only name the badge has
+        // ever had: it is a button holding one icon, with no text, title or aria-label of its own
+        val revertLabel = JSONObject.quote(TR.deckConfigRevertButtonTooltip())
+        evaluateScriptAsset(webView, MATERIAL3_REVERT_JS_ASSET, prelude = "window.ankiMaterial3RevertLabel = $revertLabel;\n")
         // the steppers' spoken labels in anki's own translations: the page's strings live inside its bundle, where
         // no injected script can reach them
         val stepperLabels =
@@ -622,6 +627,7 @@ open class PageWebViewClient : WebViewClient() {
     companion object {
         private const val MATERIAL3_THEME_CSS_ASSET = "anki_material3_theme.css"
         private const val MATERIAL3_MOTION_JS_ASSET = "anki_material3_motion.js"
+        private const val MATERIAL3_REVERT_JS_ASSET = "anki_material3_revert.js"
         private const val MATERIAL3_STEPPERS_JS_ASSET = "anki_material3_steppers.js"
         private const val VISUAL_STATE_CALLBACK_TIMEOUT_MS = 300L
 
