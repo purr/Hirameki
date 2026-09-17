@@ -388,7 +388,8 @@ class ReviewerViewModel(
 
     /**
      * Enqueues a card action behind the current in-flight action instead of dropping it.
-     * This is used for delete undo so it still runs if a delete-triggered reload is completing.
+     * This is used for delete undo so it still runs if a delete-triggered reload is completing,
+     * and for a rating, which must not be lost to the reveal still finishing (see [rateCard]).
      */
     private fun enqueueCardAction(block: suspend () -> Unit) {
         val currentJob = cardActionJob
@@ -785,6 +786,16 @@ class ReviewerViewModel(
                     isFinished = false,
                 )
         }
+        // the backend grades whichever card leads this queue state, and the reveal labels the answer buttons from it.
+        // a reload keeps the card on screen, which may no longer lead: a due date set from the reviewer moves it out
+        // of the queue, and a learning card can fall due while the note editor is open. paired with that queue, the
+        // card showed another card's intervals and its rating graded that other card unseen; with no queue left, it
+        // could be neither revealed nor rated. so the card that does lead is loaded, as every other load shows it
+        if (queue?.topCard?.id != card.id) {
+            Timber.i("card %d no longer leads the queue after a reload; loading the card that does", card.id)
+            loadCardSuspend()
+            return
+        }
         queue?.timeboxReached?.let { _effect.emit(ReviewerEffect.ShowTimeboxReachedDialog(it)) }
         _state.value = requireNotNull(updatedState)
         _queueStateFlow.value = queue
@@ -1004,11 +1015,12 @@ class ReviewerViewModel(
     }
 
     private fun rateCard(rating: CardAnswer.Rating) {
-        val queue = queueState ?: return
+        if (queueState == null) return
+        val rated = _state.value
         // a rating is only meaningful once the answer has been seen. the answer buttons already only
         // offer ratings after reveal, but a gesture that began on the previous card can land after the
         // next card loads; grading that card unseen would write a wrong review and a wrong interval
-        if (!_state.value.isAnswerShown) {
+        if (!rated.isAnswerShown) {
             Timber.w("ignoring a rating for a card whose answer is not shown")
             return
         }
@@ -1016,13 +1028,40 @@ class ReviewerViewModel(
         // webview shows nothing at all, or still the card before it (Flashcard keeps the last paint for an
         // empty base url). rating then would write a review for a card the user never saw, which is worse
         // than refusing the tap; the load's snackbar is said again so the tap does not look accepted
-        if (_state.value.baseUrl.isEmpty()) {
+        if (rated.baseUrl.isEmpty()) {
             Timber.w("ignoring a rating for a card whose page was never served")
             reportServerFailure()
             return
         }
 
-        launchCardAction {
+        // queued, not dropped: the answer is up as soon as the reveal publishes it, while the reveal's card
+        // action is still finishing, and the card view arms grading from that state. launchCardAction threw
+        // away a rating made in that window without a word: the card flew into its corner, nothing was
+        // recorded, and the same card came back seconds later
+        enqueueCardAction {
+            val shown = _state.value
+            val queue = queueState
+            // re-checked once the action ahead is done, which may have changed the card: a second tap on a card
+            // already graded would otherwise grade the next one unseen
+            if (queue == null ||
+                shown.cardDisplayIndex != rated.cardDisplayIndex ||
+                shown.cardId != rated.cardId ||
+                !shown.isAnswerShown ||
+                shown.baseUrl.isEmpty()
+            ) {
+                Timber.w("ignoring a rating for card %d: the card on screen changed before it was recorded", rated.cardId)
+                return@enqueueCardAction
+            }
+            // the answer grades the queue's top card, not the card on screen, and the two can differ with every check
+            // above still passing: a load run outside card actions (Reviewer.updateCurrentCard, which the screen runs
+            // after a collection op it did not run itself) stores the next card's queue before it publishes that
+            // card. that rating would grade a card the user never saw; nothing is recorded, and the card that leads
+            // is shown, as for a stale queue below, so the card that would be graded is on screen before any rating
+            if (queue.topCard.id != rated.cardId) {
+                Timber.w("ignoring a rating for card %d: card %d leads the queue; showing it", rated.cardId, queue.topCard.id)
+                loadCardSuspend()
+                return@enqueueCardAction
+            }
             var wasLeech = false
             try {
                 withCol {
@@ -1039,7 +1078,7 @@ class ReviewerViewModel(
                 // recorded, so show the card that now leads the queue
                 Timber.w(e, "answer refused for a stale queue; reloading")
                 loadCardSuspend()
-                return@launchCardAction
+                return@enqueueCardAction
             }
 
             if (rating == CardAnswer.Rating.AGAIN && wasLeech) {

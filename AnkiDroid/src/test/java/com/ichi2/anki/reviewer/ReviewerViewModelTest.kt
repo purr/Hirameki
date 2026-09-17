@@ -25,13 +25,16 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.cash.turbine.test
 import com.ichi2.anki.RobolectricTest
 import com.ichi2.anki.libanki.Consts
+import com.ichi2.anki.libanki.sched.SetDueDateDays
 import com.ichi2.anki.pages.AnkiServer
 import com.ichi2.anki.pages.PostRequestHandler
 import com.ichi2.anki.servicelayer.NoteService
 import io.mockk.coEvery
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -52,6 +55,9 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.android.controller.ActivityController
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertFailsWith
 
 /**
@@ -319,6 +325,242 @@ class ReviewerViewModelTest : RobolectricTest() {
             val state = viewModel.state.first()
             assertThat("the unseen card is not graded", state.cardDisplayIndex, equalTo(1L))
             assertThat("no new card was answered", state.newCount, equalTo(2))
+        }
+
+    @Test
+    fun `a rating is recorded while the question's playback is still letting go`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            addBasicNote("Front 2", "Back 2")
+            updateDeckConfig(Consts.DEFAULT_DECK_ID) { autoplay = true }
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+            // the question's playback is held in its last step: a stand-in for a sound that is slow to stop, such as
+            // one the media thread is still preparing when the card is turned over
+            val questionPlaying = CountDownLatch(1)
+            val letGo = CountDownLatch(1)
+            val held = AtomicBoolean(false)
+            viewModel.cardMediaPlayer.setOnMediaGroupCompletedListener {
+                if (held.compareAndSet(false, true)) {
+                    questionPlaying.countDown()
+                    letGo.await()
+                }
+            }
+            try {
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+                assertThat("the question is playing", questionPlaying.await(10, TimeUnit.SECONDS), equalTo(true))
+
+                viewModel.onEvent(ReviewerEvent.ShowAnswer)
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+                viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.EASY))
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+
+                // the reveal used to wait for the question's playback to stop, so its card action was still running
+                // with the answer already up, and the rating was dropped
+                val state = viewModel.state.value
+                assertThat("the rating is recorded", col.getCard(firstCardId).reps, equalTo(1))
+                assertThat("the next card is shown", state.cardDisplayIndex, equalTo(2L))
+                assertThat("with its answer hidden", state.isAnswerShown, equalTo(false))
+            } finally {
+                letGo.countDown()
+            }
+        }
+
+    @Test
+    fun `a reveal and a rating complete while every thread the player plays on is busy`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            addBasicNote("Front 2", "Back 2")
+            updateDeckConfig(Consts.DEFAULT_DECK_ID) { autoplay = true }
+            // CardMediaPlayer plays on Dispatchers.IO, which runs this many blocking tasks at once by default
+            // (kotlinx.coroutines: 64, or the core count if higher). a stalled machine starves it the same way, and
+            // that is how the full test run lost ratings: the question's playback had not even started
+            val slots = maxOf(64, Runtime.getRuntime().availableProcessors())
+            val allBusy = CountDownLatch(slots)
+            val letGo = CountDownLatch(1)
+            try {
+                repeat(slots) {
+                    Dispatchers.IO.asExecutor().execute {
+                        allBusy.countDown()
+                        letGo.await()
+                    }
+                }
+                assertThat("every player thread is busy", allBusy.await(10, TimeUnit.SECONDS), equalTo(true))
+
+                val viewModel =
+                    ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+                viewModel.onEvent(ReviewerEvent.ShowAnswer)
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+                viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.EASY))
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+
+                val state = viewModel.state.value
+                assertThat("the rating is recorded", col.getCard(firstCardId).reps, equalTo(1))
+                assertThat("the next card is shown", state.cardDisplayIndex, equalTo(2L))
+            } finally {
+                letGo.countDown()
+            }
+        }
+
+    @Test
+    fun `a rating made while the reveal is still finishing is recorded`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            addBasicNote("Front 2", "Back 2")
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+            sendInsideTheReveal(viewModel, ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD))
+
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            // the reveal's card action was still running, and launchCardAction dropped the rating without a word
+            val state = viewModel.state.value
+            assertThat("the rating is recorded", col.getCard(firstCardId).reps, equalTo(1))
+            assertThat("the next card is shown", state.cardDisplayIndex, equalTo(2L))
+            assertThat("with its answer hidden", state.isAnswerShown, equalTo(false))
+        }
+
+    @Test
+    fun `a second rating waiting behind the first does not grade the next card`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            val secondCardId = addBasicNote("Front 2", "Back 2").firstCard().id
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+            // a double tap: both ratings wait, and by the time the second runs the first has loaded the next card
+            sendInsideTheReveal(
+                viewModel,
+                ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD),
+                ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD),
+            )
+
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = viewModel.state.value
+            assertThat("the rated card is graded once", col.getCard(firstCardId).reps, equalTo(1))
+            assertThat("the next card is not graded unseen", col.getCard(secondCardId).reps, equalTo(0))
+            assertThat("the next card is shown", state.cardDisplayIndex, equalTo(2L))
+            assertThat("with its answer hidden", state.isAnswerShown, equalTo(false))
+        }
+
+    @Test
+    fun `a rating waiting behind the reveal is not recorded once the answer is hidden again`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            addBasicNote("Front 2", "Back 2")
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+            // hiding the answer is not a card action, so it lands while the rating still waits for the reveal
+            sendInsideTheReveal(
+                viewModel,
+                ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD),
+                ReviewerEvent.UnanswerCard,
+            )
+
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            val state = viewModel.state.value
+            assertThat("a card whose answer was hidden again is not graded", col.getCard(firstCardId).reps, equalTo(0))
+            assertThat("the card stays on screen", state.cardDisplayIndex, equalTo(1L))
+            assertThat("with its answer hidden", state.isAnswerShown, equalTo(false))
+        }
+
+    @Test
+    fun `a reload that finds another card leading the queue shows that card`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            val secondCardId = addBasicNote("Front 2", "Back 2").firstCard().id
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            assertThat("the first card is shown", viewModel.state.value.cardId, equalTo(firstCardId))
+
+            // a due date set from the reviewer's menu moves the card on screen out of today's queue, then reloads it
+            col.sched.setDueDate(listOf(firstCardId), SetDueDateDays("5"))
+            viewModel.onEvent(ReviewerEvent.SetDueDateConfirmed(1))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            // the reload kept the first card on screen with the second card's queue: its answer showed the second
+            // card's intervals, and a rating graded the second card unseen
+            val state = viewModel.state.value
+            assertThat("the card leading the queue is shown", state.cardId, equalTo(secondCardId))
+            assertThat("as a new card on screen", state.cardDisplayIndex, equalTo(2L))
+        }
+
+    @Test
+    fun `a rating is not recorded for a card another load has put at the top of the queue`() =
+        runTest {
+            val firstCardId = addBasicNote("Front 1", "Back 1").firstCard().id
+            val secondCardId = addBasicNote("Front 2", "Back 2").firstCard().id
+            // the player is mocked below; with autoplay on, a playback on another thread calls into it while the mock
+            // is set up or taken down, and mockk fails that call
+            updateDeckConfig(Consts.DEFAULT_DECK_ID) { autoplay = false }
+            val viewModel =
+                ReviewerViewModel(ApplicationProvider.getApplicationContext(), StandardTestDispatcher(testScheduler))
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+            viewModel.onEvent(ReviewerEvent.ShowAnswer)
+            testScheduler.advanceUntilIdle()
+            advanceRobolectricLooper()
+
+            // the screen loads a card outside the view model's card actions after a collection op it did not run
+            // itself (Reviewer.updateCurrentCard). this load is held after it has stored the second card's queue
+            // and before it publishes that card, while the card's sounds load
+            col.sched.suspendCards(listOf(firstCardId))
+            val player = viewModel.cardMediaPlayer
+            val releaseLoad = CompletableDeferred<Unit>()
+            var loadHeld = false
+            mockkObject(player)
+            try {
+                coEvery { player.loadCardAvTags(any()) } coAnswers {
+                    if (!loadHeld) {
+                        loadHeld = true
+                        releaseLoad.await()
+                    }
+                    callOriginal()
+                }
+                val outsideLoad = launch(StandardTestDispatcher(testScheduler)) { viewModel.loadCardSuspend() }
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+                assertThat("the load is held", loadHeld, equalTo(true))
+                assertThat("the first card is still on screen", viewModel.state.value.cardId, equalTo(firstCardId))
+
+                viewModel.onEvent(ReviewerEvent.RateCard(anki.scheduler.CardAnswer.Rating.GOOD))
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+
+                // every check on the card on screen passes, but the answer grades the queue's top card
+                assertThat("the second card is not graded unseen", col.getCard(secondCardId).reps, equalTo(0))
+                assertThat("the card that would be graded is shown", viewModel.state.value.cardId, equalTo(secondCardId))
+
+                releaseLoad.complete(Unit)
+                testScheduler.advanceUntilIdle()
+                advanceRobolectricLooper()
+                assertThat("the held load finishes", outsideLoad.isCompleted, equalTo(true))
+            } finally {
+                unmockkObject(player)
+            }
         }
 
     @Test
@@ -1014,6 +1256,24 @@ class ReviewerViewModelTest : RobolectricTest() {
             answerShownAtAutoplay += viewModel.state.value.isAnswerShown
         }
         return answerShownAtAutoplay
+    }
+
+    /**
+     * sends [events] to [viewModel] from inside the reveal's card action, just after it has put the answer up. deck
+     * autoplay is turned off, so the player reports the reveal's autoplay at once, within that action
+     */
+    private fun sendInsideTheReveal(
+        viewModel: ReviewerViewModel,
+        vararg events: ReviewerEvent,
+    ) {
+        updateDeckConfig(Consts.DEFAULT_DECK_ID) { autoplay = false }
+        var sent = false
+        viewModel.cardMediaPlayer.setOnMediaGroupCompletedListener {
+            if (viewModel.state.value.isAnswerShown && !sent) {
+                sent = true
+                events.forEach { viewModel.onEvent(it) }
+            }
+        }
     }
 
     /** an activity hosting the view model, as Reviewer does; [savedState] rebuilds one after process death */

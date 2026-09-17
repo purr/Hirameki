@@ -655,8 +655,9 @@ fun DraggableFlashcard(
         if (phase != CardPhase.Away) return@LaunchedEffect
         delay(spec.awayTimeoutMillis.toLong())
         if (phase == CardPhase.Away) {
-            // the view model drops a rating while another card action is still running; with no next
-            // card coming, the graded card has to come back rather than leave the screen empty
+            // the view model refuses a rating it must not record, such as one for a page that was never
+            // served; with no next card coming, the graded card has to come back rather than leave the
+            // screen empty
             Timber.w("card view: no next card %d ms after grading, showing the card again", spec.awayTimeoutMillis)
             resetToRest()
             playEntrance()
