@@ -114,6 +114,7 @@ import com.ichi2.anki.scheduling.SetDueDateViewModel
 import com.ichi2.anki.servicelayer.getFSRSStatus
 import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.showThemedToast
+import com.ichi2.anki.ui.compose.components.hideAfter
 import com.ichi2.anki.ui.windows.reviewer.whiteboard.ToolbarAlignment
 import com.ichi2.anki.ui.windows.reviewer.whiteboard.WhiteboardViewModel
 import kotlinx.coroutines.CancellationException
@@ -665,12 +666,7 @@ fun ReviewerContent(
                         leadingContent = { Icon(icon, contentDescription = null) },
                         modifier =
                             Modifier.clickable {
-                                scope.launch { sheetState.hide() }.invokeOnCompletion {
-                                    if (!sheetState.isVisible) {
-                                        showBottomSheet = false
-                                    }
-                                }
-                                action()
+                                sheetState.hideAfter(scope, onHidden = { showBottomSheet = false }, action = action)
                             },
                     ) { Text(stringResource(textRes)) }
                 }

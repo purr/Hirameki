@@ -16,11 +16,13 @@
 package com.ichi2.anki.notetype.compose
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.Dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -38,12 +40,13 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * the entrance of the note type action sheet.
+ * the entrance and exit of the note type action sheet.
  *
- * each of the sheet's buttons closes it by dropping it from composition, so the sheet never animates
- * back to hidden on the way out. a sheet state that outlives one open therefore re-enters expanded,
- * and material3 puts such a sheet on screen with no animation at all - so the state has to be scoped
- * to the sheet itself.
+ * a sheet state that outlives one open and is left expanded re-enters expanded, and material3 puts such
+ * a sheet on screen with no animation at all - so the state has to be scoped to the sheet itself.
+ *
+ * the sheet's buttons close it by sliding it out first and only then dropping it from composition; a
+ * button that dropped it straight away would make it vanish, the mirror of the missing entrance.
  *
  * that state is also saved with the screen, so a recreation with the sheet open has to bring the
  * sheet back open too, or the saved "expanded" is left for the next open to pick up.
@@ -71,10 +74,12 @@ class ManageNoteTypesSheetTest : RobolectricTest() {
         // proves the probe can see an entrance at all, so the same check on the reopen means something
         assertThat("the first sheet starts below where it settles", firstStartingTop, greaterThan(firstRestingTop))
 
-        // the path the bug needs: an action button, not a swipe or a tap on the scrim
-        composeTestRule.onNodeWithText(getResourceString(R.string.fields)).performTouchInput { click() }
+        // an action button, not a swipe or a tap on the scrim
+        tapFields()
         frames(2)
         assertThat("the fields action fired", fieldsShown, equalTo(1))
+        // the button slides the sheet out before it goes, so the reopen waits for that
+        settle()
         composeTestRule.onNodeWithText(getResourceString(R.string.fields)).assertDoesNotExist()
 
         tapNoteType()
@@ -112,8 +117,8 @@ class ManageNoteTypesSheetTest : RobolectricTest() {
         // the saved sheet position is only read if the sheet comes back; closed, it lingers for the next open
         composeTestRule.onNodeWithText(getResourceString(R.string.fields)).assertExists("the sheet survives the recreation")
 
-        composeTestRule.onNodeWithText(getResourceString(R.string.fields)).performTouchInput { click() }
-        frames(2)
+        tapFields()
+        settle()
         composeTestRule.onNodeWithText(getResourceString(R.string.fields)).assertDoesNotExist()
 
         tapNoteType()
@@ -125,6 +130,37 @@ class ManageNoteTypesSheetTest : RobolectricTest() {
             reopenStartingTop,
             greaterThan(restingTop),
         )
+    }
+
+    @Test
+    fun `an action button slides the sheet out, and a click on the way out runs nothing`() {
+        composeTestRule.mainClock.autoAdvance = false
+        setScreenContent()
+        tapNoteType()
+        // gives the entrance its first frame before the clock jumps: an animation takes its start time from that
+        // frame, so one first run at the end of the jump starts there and leaves the sheet below the screen
+        composeTestRule.waitForIdle()
+        settle()
+        val restingTop = sheetTop()
+
+        tapFields()
+        frames(EXIT_FRAMES)
+        assertThat("the fields action fired", fieldsShown, equalTo(1))
+        composeTestRule
+            .onNodeWithText(getResourceString(R.string.fields))
+            .assertExists("the sheet is still on screen mid-exit")
+        assertThat("the sheet is sliding down, not gone at once", sheetTop(), greaterThan(restingTop))
+
+        // the button stays clickable while the sheet slides out. a touch on it is mostly cancelled by the button
+        // moving away under the finger, an accessibility click never is, so that is the click used here
+        composeTestRule
+            .onNodeWithText(getResourceString(R.string.fields))
+            .performSemanticsAction(SemanticsActions.OnClick)
+        frames(EXIT_FRAMES)
+        assertThat("a second click on the way out runs nothing", fieldsShown, equalTo(1))
+
+        settle()
+        composeTestRule.onNodeWithText(getResourceString(R.string.fields)).assertDoesNotExist()
     }
 
     /** the top edge of the sheet, which rises as the sheet slides in */
@@ -141,7 +177,13 @@ class ManageNoteTypesSheetTest : RobolectricTest() {
         frames(2)
     }
 
-    /** long enough for any sheet entrance to finish */
+    /** taps the fields button, and gives the slide-out it starts its first frame before the clock moves */
+    private fun tapFields() {
+        composeTestRule.onNodeWithText(getResourceString(R.string.fields)).performTouchInput { click() }
+        composeTestRule.waitForIdle()
+    }
+
+    /** long enough for any sheet entrance or exit to finish */
     private fun settle() = composeTestRule.mainClock.advanceTimeBy(2_000L)
 
     private fun frames(count: Int) = repeat(count) { composeTestRule.mainClock.advanceTimeByFrame() }
@@ -171,5 +213,10 @@ class ManageNoteTypesSheetTest : RobolectricTest() {
                 onNavigateUp = {},
             )
         }
+    }
+
+    private companion object {
+        /** ~64ms: into the sheet's exit, short of its ~150ms end */
+        const val EXIT_FRAMES = 4
     }
 }

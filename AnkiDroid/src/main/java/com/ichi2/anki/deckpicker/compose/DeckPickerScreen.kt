@@ -102,6 +102,7 @@ import com.ichi2.anki.ui.compose.SnackbarPaddingBottom
 import com.ichi2.anki.ui.compose.components.AnkiSearchBar
 import com.ichi2.anki.ui.compose.components.ExpandableFab
 import com.ichi2.anki.ui.compose.components.ExpandableFabContainer
+import com.ichi2.anki.ui.compose.components.MenuExitMotion
 import com.ichi2.anki.ui.compose.components.Scrim
 import com.ichi2.anki.ui.compose.components.SyncIcon
 import com.ichi2.anki.ui.compose.components.predictiveBackSearchAnim
@@ -504,63 +505,65 @@ fun MoreOptionsMenu(
                 contentDescription = stringResource(R.string.more_options),
             )
         }
-        DropdownMenu(
-            expanded = isMoreOptionsMenuOpen,
-            onDismissRequest = { onMoreOptionsMenuOpenChange(false) },
-            shape = MaterialTheme.shapes.large,
-        ) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.check_db)) },
-                onClick = {
-                    onMoreOptionsMenuOpenChange(false)
-                    moreOptionsMenuActions.onCheckDatabase()
-                },
-                leadingIcon = {
-                    Icon(
-                        painterResource(R.drawable.checklist_24px),
-                        contentDescription = null,
-                    )
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.model_browser_label)) },
-                onClick = {
-                    onMoreOptionsMenuOpenChange(false)
-                    moreOptionsMenuActions.onManageNoteTypes()
-                },
-                leadingIcon = {
-                    Icon(
-                        painterResource(R.drawable.list_24px),
-                        contentDescription = null,
-                    )
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(text = TR.actionsExport()) },
-                onClick = {
-                    onMoreOptionsMenuOpenChange(false)
-                    moreOptionsMenuActions.onExport()
-                },
-                leadingIcon = {
-                    Icon(
-                        painterResource(R.drawable.file_export_24px),
-                        contentDescription = null,
-                    )
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(TR.actionsEmptyCards()) },
-                onClick = {
-                    onMoreOptionsMenuOpenChange(false)
-                    moreOptionsMenuActions.onDeleteEmptyCards()
-                },
-                leadingIcon = {
-                    Icon(
-                        painterResource(R.drawable.delete_24px),
-                        contentDescription = null,
-                    )
-                },
-            )
+        MenuExitMotion(expanded = isMoreOptionsMenuOpen) {
+            DropdownMenu(
+                expanded = isMoreOptionsMenuOpen,
+                onDismissRequest = { onMoreOptionsMenuOpenChange(false) },
+                shape = MaterialTheme.shapes.large,
+            ) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.check_db)) },
+                    onClick = {
+                        onMoreOptionsMenuOpenChange(false)
+                        moreOptionsMenuActions.onCheckDatabase()
+                    },
+                    leadingIcon = {
+                        Icon(
+                            painterResource(R.drawable.checklist_24px),
+                            contentDescription = null,
+                        )
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.model_browser_label)) },
+                    onClick = {
+                        onMoreOptionsMenuOpenChange(false)
+                        moreOptionsMenuActions.onManageNoteTypes()
+                    },
+                    leadingIcon = {
+                        Icon(
+                            painterResource(R.drawable.list_24px),
+                            contentDescription = null,
+                        )
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(text = TR.actionsExport()) },
+                    onClick = {
+                        onMoreOptionsMenuOpenChange(false)
+                        moreOptionsMenuActions.onExport()
+                    },
+                    leadingIcon = {
+                        Icon(
+                            painterResource(R.drawable.file_export_24px),
+                            contentDescription = null,
+                        )
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(TR.actionsEmptyCards()) },
+                    onClick = {
+                        onMoreOptionsMenuOpenChange(false)
+                        moreOptionsMenuActions.onDeleteEmptyCards()
+                    },
+                    leadingIcon = {
+                        Icon(
+                            painterResource(R.drawable.delete_24px),
+                            contentDescription = null,
+                        )
+                    },
+                )
+            }
         }
     }
 }

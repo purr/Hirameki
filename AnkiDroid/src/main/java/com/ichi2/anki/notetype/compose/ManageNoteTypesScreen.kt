@@ -93,6 +93,7 @@ import com.ichi2.anki.R
 import com.ichi2.anki.notetype.ManageNoteTypeUiModel
 import com.ichi2.anki.notetype.ManageNoteTypesUiState
 import com.ichi2.anki.ui.compose.components.AnkiSearchBar
+import com.ichi2.anki.ui.compose.components.MenuExitMotion
 import com.ichi2.anki.ui.compose.components.predictiveBackSearchAnim
 import com.ichi2.anki.ui.compose.theme.AnkiDroidTheme
 
@@ -218,12 +219,15 @@ fun ManageNoteTypesScreen(
 
             if (!uiState.isInMultiSelectMode) {
                 selectedNoteType?.let { noteType ->
-                    // the sheet state lives and dies with the sheet. every action button closes the
-                    // sheet by dropping it from composition, which never animates the state back to
-                    // hidden, so a state hoisted above this block would still read expanded on the
-                    // next open - and material3 skips the show animation when the state it enters
-                    // with is not hidden, making that open appear instantly
+                    // the sheet state lives and dies with the sheet. the action buttons slide the sheet
+                    // out before clearing selectedNoteTypeId, but the sheet can still leave composition
+                    // without hiding (its note type gone from the list, say), and a state hoisted above
+                    // this block would then still read expanded on the next open - material3 skips the
+                    // show animation when the state it enters with is not hidden, making that open
+                    // appear instantly
                     val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden)
+                    // the sheet clears selectedNoteTypeId itself once it has slid out; clearing it in an
+                    // action too would drop the sheet mid-exit, so it would vanish instead
                     NoteTypeActionBottomSheet(
                         noteType = noteType,
                         sheetState = sheetState,
@@ -231,10 +235,7 @@ fun ManageNoteTypesScreen(
                         onShowFields = { onShowFields(noteType) },
                         onEditCards = { onEditCards(noteType) },
                         onRename = { noteTypeToRename = noteType },
-                        onDelete = {
-                            onDeleteRequest(noteType)
-                            selectedNoteTypeId = null
-                        })
+                        onDelete = { onDeleteRequest(noteType) })
                 }
             }
 
@@ -594,23 +595,25 @@ fun AddNoteTypeDialog(
                             )
                             .fillMaxWidth()
                     )
-                    ExposedDropdownMenu(
-                        expanded = expanded, onDismissRequest = { expanded = false }) {
-                        uiState.addOptions.forEach { option ->
-                            DropdownMenuItem(text = {
-                                val prefixRes = if (option.isStandard) {
-                                    R.string.model_browser_add_add
-                                } else {
-                                    R.string.model_browser_add_clone
-                                }
-                                Text(stringResource(prefixRes, option.name))
-                            }, onClick = {
-                                selectedOption = option
-                                expanded = false
-                                if (newName.isEmpty()) {
-                                    newName = option.name + "-new"
-                                }
-                            })
+                    MenuExitMotion(expanded = expanded) {
+                        ExposedDropdownMenu(
+                            expanded = expanded, onDismissRequest = { expanded = false }) {
+                            uiState.addOptions.forEach { option ->
+                                DropdownMenuItem(text = {
+                                    val prefixRes = if (option.isStandard) {
+                                        R.string.model_browser_add_add
+                                    } else {
+                                        R.string.model_browser_add_clone
+                                    }
+                                    Text(stringResource(prefixRes, option.name))
+                                }, onClick = {
+                                    selectedOption = option
+                                    expanded = false
+                                    if (newName.isEmpty()) {
+                                        newName = option.name + "-new"
+                                    }
+                                })
+                            }
                         }
                     }
                 }
