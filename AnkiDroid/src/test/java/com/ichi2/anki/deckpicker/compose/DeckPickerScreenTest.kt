@@ -17,12 +17,14 @@ package com.ichi2.anki.deckpicker.compose
 
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +50,7 @@ import com.ichi2.anki.R
 import com.ichi2.anki.RobolectricTest
 import com.ichi2.anki.SyncIconState
 import com.ichi2.anki.deckpicker.DisplayDeckNode
+import com.ichi2.anki.deckpicker.filterAndFlattenDisplay
 import com.ichi2.anki.libanki.sched.DeckNode
 import com.ichi2.anki.ui.compose.components.ADD_DECK_FAB_TAG
 import com.ichi2.anki.ui.compose.components.GET_SHARED_FAB_TAG
@@ -584,6 +587,99 @@ class DeckPickerScreenTest : RobolectricTest() {
         composeTestRule.waitForIdle()
 
         assertEquals(true, callbackInvoked)
+    }
+
+    @Test
+    fun collapsingADeckAnimatesItsSubdecksAwayAndExpandingShowsThemAtOnce() {
+        val expandLabel = InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.expand)
+        val decks = setDeckListContent(parentWithChild(collapsed = false))
+        composeTestRule.onNodeWithText("Child").assertIsDisplayed()
+
+        // frame by frame: the collapse animation must not finish between the checks
+        composeTestRule.mainClock.autoAdvance = false
+        composeTestRule.runOnIdle { decks.value = parentWithChild(collapsed = true) }
+        composeTestRule.waitForIdle()
+        composeTestRule.mainClock.advanceTimeByFrame()
+        composeTestRule.onNodeWithContentDescription(expandLabel).assertExists() // the frame composed the collapse
+        // collapsing drops the subdeck from the list, but it stays composed while it animates away
+        composeTestRule.onNodeWithText("Child").assertExists()
+
+        composeTestRule.mainClock.autoAdvance = true
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Child").assertDoesNotExist()
+
+        expandParentAndAssertChildOnThatFrame(decks)
+    }
+
+    @Test
+    fun aDeckFirstShownCollapsedShowsItsSubdecksOnTheFrameThatExpandsIt() {
+        // no expanded frame came before, so no subdecks saved from one can stand in for the current ones
+        val decks = setDeckListContent(parentWithChild(collapsed = true))
+        composeTestRule.onNodeWithText("Child").assertDoesNotExist()
+
+        expandParentAndAssertChildOnThatFrame(decks)
+    }
+
+    /** the deck list alone, showing [initial]; set the returned state to change the decks */
+    private fun setDeckListContent(initial: List<DisplayDeckNode>): MutableState<List<DisplayDeckNode>> {
+        val decks = mutableStateOf(initial)
+        composeTestRule.setContent {
+            AnkiDroidTheme {
+                DeckPickerContent(
+                    decks = decks.value,
+                    onRefresh = {},
+                    listState = rememberLazyListState(),
+                    deckRowActions = emptyDeckRowActions(),
+                    onAddDeck = {},
+                    onAddSharedDeck = {},
+                    isInInitialState = false,
+                )
+            }
+        }
+        return decks
+    }
+
+    /**
+     * expands "Parent" one frame at a time and checks "Child" is on the frame that composes the expand. subdecks saved
+     * after composition would only arrive on the next frame, which the stopped clock never runs
+     */
+    private fun expandParentAndAssertChildOnThatFrame(decks: MutableState<List<DisplayDeckNode>>) {
+        val collapseLabel = InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.collapse)
+        composeTestRule.mainClock.autoAdvance = false
+        composeTestRule.runOnIdle { decks.value = parentWithChild(collapsed = false) }
+        composeTestRule.waitForIdle()
+        composeTestRule.mainClock.advanceTimeByFrame()
+        composeTestRule.onNodeWithContentDescription(collapseLabel).assertExists() // the frame composed the expand
+        composeTestRule.onNodeWithText("Child").assertExists()
+        composeTestRule.mainClock.autoAdvance = true
+    }
+
+    /** the flattened rows of a top level "Parent" deck with one subdeck, "Child" */
+    private fun parentWithChild(collapsed: Boolean): List<DisplayDeckNode> {
+        val child =
+            deckTreeNode {
+                name = "Child"
+                deckId = 2L
+                level = 2
+            }
+        val parent =
+            deckTreeNode {
+                name = "Parent"
+                deckId = 1L
+                level = 1
+                this.collapsed = collapsed
+                children.add(child)
+            }
+        val root =
+            DeckNode(
+                node =
+                    deckTreeNode {
+                        level = 0
+                        children.add(parent)
+                    },
+                fullDeckName = "",
+            )
+        return root.filterAndFlattenDisplay(filter = null, selectedDeckId = 0L, decksWithBuried = emptySet())
     }
 
     private fun displayDeck(
