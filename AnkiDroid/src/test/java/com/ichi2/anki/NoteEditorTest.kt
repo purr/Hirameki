@@ -61,6 +61,7 @@ import org.junit.Ignore
 import org.junit.Test
 import org.junit.jupiter.api.assertDoesNotThrow
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowLooper
 import java.util.concurrent.atomic.AtomicReference
@@ -380,6 +381,40 @@ class NoteEditorTest : RobolectricTest() {
             equalTo(true),
         )
     }
+
+    @Test
+    fun `a system back finish clears temp note type files, a pause does not`() {
+        CardTemplateNotetype.clearTempNoteTypeFiles()
+        // the card template editor keeps its unsaved note type in these files while it is open over the note editor
+        CardTemplateNotetype.saveTempNoteType(targetContext, col.notetypes.byName("Basic")!!)
+        ensureCollectionLoadIsSynchronous()
+        val controller =
+            Robolectric
+                .buildActivity(NoteEditorActivity::class.java, NoteEditorLauncher.AddNote().toIntent(targetContext))
+                .create()
+                .start()
+                .resume()
+                .visible()
+        saveControllerForCleanup(controller)
+        idleMainLooper()
+
+        controller.pause()
+        assertThat("paused under another screen, which may still use the files", tempNoteTypeFileCount(), equalTo(1))
+
+        controller.resume()
+        // a clean editor leaves back to the system, which finishes it without closeNoteEditor()
+        controller.get().onBackPressedDispatcher.onBackPressed()
+        assertThat("back finishes the clean editor", controller.get().isFinishing)
+        // robolectric only marks the activity finished; the pause that follows a finish is driven here
+        controller.pause()
+        assertThat("closing the editor clears the files", tempNoteTypeFileCount(), equalTo(0))
+    }
+
+    private fun tempNoteTypeFileCount(): Int =
+        targetContext.cacheDir
+            .listFiles()
+            .orEmpty()
+            .count { it.name.startsWith("editedTemplate") && it.name.endsWith(".json") }
 
     @Test
     fun `pinned field remains unsaved after saving added note`() = runTest {

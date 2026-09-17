@@ -21,11 +21,13 @@ import android.content.DialogInterface
 import android.content.Intent
 import android.os.Bundle
 import android.widget.EditText
+import androidx.appcompat.app.AlertDialog
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.shape.MaterialShapeDrawable
 import com.ichi2.anki.CardTemplateEditor.CardTemplateFragment.CardTemplate
 import com.ichi2.anki.CollectionManager.withCol
+import com.ichi2.anki.dialogs.utils.input
 import com.ichi2.anki.libanki.NotetypeJson
 import com.ichi2.anki.libanki.testutils.ext.addNote
 import com.ichi2.anki.model.SelectableDeck
@@ -42,6 +44,7 @@ import org.robolectric.Robolectric
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowActivity
+import org.robolectric.shadows.ShadowDialog
 import timber.log.Timber
 import kotlin.test.junit5.JUnit5Asserter.assertEquals
 import kotlin.test.junit5.JUnit5Asserter.assertNotEquals
@@ -77,6 +80,7 @@ class CardTemplateEditorTest : RobolectricTest() {
         templateFront.text.append(testNoteTypeQfmtEdit)
         advanceRobolectricLooper()
         assertTrue("Note type did not change after edit?", testEditor.noteTypeHasChanged())
+        assertTrue("back must ask before discarding typed edits", testEditor.displayDiscardChangesCallback.isEnabled)
         assertEquals(
             "Change already in database?",
             collectionBasicNoteTypeOriginal.toString().trim(),
@@ -98,6 +102,7 @@ class CardTemplateEditorTest : RobolectricTest() {
         testEditor = templateEditorController.get()
         var shadowTestEditor = shadowOf(testEditor)
         assertTrue("note type change not preserved across activity lifecycle?", testEditor.noteTypeHasChanged())
+        assertTrue("back must ask before discarding restored edits", testEditor.displayDiscardChangesCallback.isEnabled)
         assertEquals(
             "Change already in database?",
             collectionBasicNoteTypeOriginal.toString().trim(),
@@ -704,9 +709,50 @@ class CardTemplateEditorTest : RobolectricTest() {
         MatcherAssert.assertThat("Deck ID element should be null", template?.jsonObject?.get("did"), Matchers.equalTo(JSONObject.NULL))
         editor.onDeckSelected(SelectableDeck.Deck(1, "hello"))
         MatcherAssert.assertThat("Deck ID element should be changed", template?.jsonObject?.get("did"), Matchers.equalTo(1L))
+        assertTrue("back must ask before discarding a deck override", editor.displayDiscardChangesCallback.isEnabled)
         editor.onDeckSelected(null)
         MatcherAssert.assertThat("Deck ID element should exist", template!!.jsonObject.has("did"), Matchers.equalTo(true))
         MatcherAssert.assertThat("Deck ID element should be null", template.jsonObject["did"], Matchers.equalTo(JSONObject.NULL))
+        assertFalse("removing the override again leaves nothing to discard", editor.displayDiscardChangesCallback.isEnabled)
+    }
+
+    @Test
+    fun `renaming a card type or changing its browser appearance keeps back's discard prompt current`() {
+        val intent = Intent(Intent.ACTION_VIEW)
+        intent.putExtra("noteTypeId", getCurrentDatabaseNoteTypeCopy("Basic").id)
+        val editor = super.startActivityNormallyOpenCollectionWithIntent(CardTemplateEditor::class.java, intent)
+        val originalName = editor.tempNoteType!!.getTemplate(0).name
+        assertFalse("a clean editor leaves back to the system", editor.displayDiscardChangesCallback.isEnabled)
+
+        fun rename(name: String) {
+            // renaming refreshes the pager, so the current fragment is looked up for every step
+            editor.currentFragment!!.showRenameDialog()
+            advanceRobolectricLooper()
+            (ShadowDialog.getLatestDialog() as AlertDialog).input = name
+            clickAlertDialogButton(DialogInterface.BUTTON_POSITIVE, true)
+            advanceRobolectricLooper()
+        }
+        rename("Renamed")
+        assertTrue("back must ask before discarding a rename", editor.displayDiscardChangesCallback.isEnabled)
+        rename(originalName)
+        assertFalse("renaming it back leaves nothing to discard", editor.displayDiscardChangesCallback.isEnabled)
+
+        fun returnBrowserAppearance(question: String) {
+            editor.currentFragment!!.openBrowserAppearance()
+            advanceRobolectricLooper()
+            val shadowEditor = shadowOf(editor)
+            val request = shadowEditor.nextStartedActivityForResult.intent
+            shadowEditor.receiveResult(
+                request,
+                Activity.RESULT_OK,
+                CardTemplateBrowserAppearanceEditor.getIntent(targetContext, question, ""),
+            )
+            advanceRobolectricLooper()
+        }
+        returnBrowserAppearance("{{Front}}")
+        assertTrue("back must ask before discarding a browser appearance", editor.displayDiscardChangesCallback.isEnabled)
+        returnBrowserAppearance("")
+        assertFalse("restoring the browser appearance leaves nothing to discard", editor.displayDiscardChangesCallback.isEnabled)
     }
 
     @Test
