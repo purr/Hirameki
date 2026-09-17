@@ -41,8 +41,8 @@ val homePath: String? = System.getProperty("user.home")
 // the third digit from the end is ankidroid's build type, and VersionUtils.isReleaseVersion reads a 3 there as a
 // store release, which opens ankidroid's changelog after every update. keep it below 3: bump only the last two
 // digits, and when they run out, the digits in front of the build type. VersionUtilsTest fails on a release code
-val baseVersionCode = 22300135
-val baseVersionName = "1.2.11"
+val baseVersionCode = 22300136
+val baseVersionName = "1.2.12"
 
 fun gitCommitHash(): String =
     try {
