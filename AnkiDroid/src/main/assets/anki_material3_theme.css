@@ -43,7 +43,9 @@ a:visited {
     padding: 0 16px 4px !important;
 }
 
-.range-box > div {
+/* the two option groups. the range box's first div is the loading spinner (.spin), which a pill
+   around it would draw as a filled blob whenever it fades in */
+.range-box > div:not(.spin) {
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
@@ -52,15 +54,6 @@ a:visited {
     border-radius: 24px !important;
     padding: 4px !important;
     max-width: 100% !important;
-}
-
-.range-box > div:first-of-type {
-    flex-wrap: wrap !important;
-}
-
-.range-box > div:first-of-type input[type="text"] {
-    flex: 1 1 100% !important;
-    margin-top: 8px !important;
 }
 
 .range-box label {
@@ -77,7 +70,6 @@ a:visited {
     background-color: var(--border) !important;
 }
 
-.range-box input[type="radio"]:checked + label,
 .range-box label:has(input[type="radio"]:checked) {
     background-color: var(--m3-tertiary-container) !important;
     color: var(--m3-on-tertiary-container) !important;
@@ -110,18 +102,9 @@ a:visited {
     box-shadow: none !important;
 }
 
-.graphs-container h2,
-.graphs-container h3,
-.graphs-container .title,
-svg text,
-.axis text {
+svg text {
     color: var(--fg) !important;
     fill: var(--fg) !important;
-}
-
-svg .axis path,
-svg .axis line {
-    stroke: var(--border) !important;
 }
 
 /*
@@ -295,8 +278,9 @@ body:has(.deck-options-page) .modal-body input[type="text"] {
     opacity: 1;
 }
 
-/* focus: a 2px primary ring inside the field; selects keep it while their menu is open */
-.deck-options-page .row-columns .dynamically-slottable .spin-box:focus-within,
+/* focus: a 2px primary ring inside the field; selects keep it while their menu is open. a number
+   field rings for its input only: a stepper that takes focus (talkback's click) is no edit */
+.deck-options-page .row-columns .dynamically-slottable .spin-box:has(> input:focus),
 .deck-options-page .row-columns .dynamically-slottable input[type="text"]:focus,
 .deck-options-page .row-columns .dynamically-slottable input[type="date"]:focus,
 .deck-options-page .row-columns .dynamically-slottable textarea:focus,
@@ -324,11 +308,58 @@ body:has(.deck-options-page) .modal-body input[type="text"]:focus {
     color: inherit;
 }
 
+/* the overlay is laid out from the number's start edge, so it takes the same logical side as the
+   margin: upstream's physical left put the "%" at the wrong end of an rtl field */
 .deck-options-page .row-columns .dynamically-slottable .spin-box .suffix {
     top: 0;
-    left: calc(8px + 0.5em);
+    left: auto;
+    inset-inline-start: calc(8px + 0.5em);
     line-height: 48px; /* same baseline as the input's vertically centred text */
     color: var(--m3-on-surface-variant);
+}
+
+/* - and + at the ends of the field (anki_material3_steppers.js; upstream's step buttons are
+   desktop-only). a 40px tonal icon button inside a 48px touch target of transparent borders. the
+   field keeps room for both, a shown revert icon and five digits (48 + 48 + 48 + 64px): a row too
+   narrow for that wraps, putting its label above the field as the rows with tabs do on a phone */
+.deck-options-page .row-columns .dynamically-slottable .spin-box:has(> .m3-stepper) {
+    min-width: 208px;
+}
+
+.deck-options-page .row-columns .dynamically-slottable .spin-box > .m3-stepper {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    border: 4px solid transparent;
+    border-radius: 50%;
+    background-clip: padding-box; /* the fill and its state layer stop at the 40px circle */
+    background-color: var(--m3-secondary-container);
+    background-image: none; /* upstream's hover gradient for every plain button, which touch keeps after a tap */
+    color: var(--m3-on-secondary-container);
+    box-shadow: none; /* upstream's pressed shadow for every plain button */
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation; /* quick taps are steps, not a double-tap zoom */
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.deck-options-page .row-columns .dynamically-slottable .spin-box > .m3-stepper > svg {
+    width: 24px;
+    height: 24px;
+    fill: currentColor;
+}
+
+.deck-options-page .row-columns .dynamically-slottable .spin-box > .m3-stepper + input {
+    margin-inline-start: 0; /* the - button is the inset */
+}
+
+.deck-options-page .row-columns .dynamically-slottable .spin-box:has(> .m3-stepper) .suffix {
+    inset-inline-start: calc(48px + 0.5em);
 }
 
 /* select: upstream styles it as a gradient button with a divided chevron */
@@ -368,6 +399,10 @@ body:has(.deck-options-page) .sticky-container .select-container .chevron {
 
 .deck-options-page .row-columns .dynamically-slottable .config-input:has(> .select-container) > .revert {
     inset-inline-end: 44px; /* before the chevron */
+}
+
+.deck-options-page .row-columns .dynamically-slottable .config-input:has(> .spin-box > .m3-stepper) > .revert {
+    inset-inline-end: 52px; /* before the + button, centred in the room the value keeps for it */
 }
 
 .deck-options-page .row-columns .dynamically-slottable .config-input:has(> textarea, > details) > .revert {
@@ -1193,6 +1228,7 @@ body:has(.deck-options-page) .carousel-item.active {
     .deck-options-page .row-columns .dynamically-slottable .revert .badge:hover,
     .deck-options-page .row-columns > .container > .position-relative > .help-badge > .badge:hover,
     .deck-options-page .row-columns .dynamically-slottable .select-container:hover,
+    .deck-options-page .row-columns .dynamically-slottable .spin-box > .m3-stepper:hover,
     body:has(.deck-options-page) .sticky-container .select-container:hover,
     body:has(.deck-options-page) .sticky-container .label-button.primary:hover,
     body:has(.deck-options-page) .sticky-container .icon-button.chevron:hover,
@@ -1208,6 +1244,7 @@ body:has(.deck-options-page) .carousel-item.active {
 .deck-options-page .row-columns .dynamically-slottable .revert .badge:active,
 .deck-options-page .row-columns > .container > .position-relative > .help-badge > .badge:active,
 .deck-options-page .row-columns .dynamically-slottable .select-container:active,
+.deck-options-page .row-columns .dynamically-slottable .spin-box > .m3-stepper:active,
 body:has(.deck-options-page) .sticky-container .select-container:active,
 body:has(.deck-options-page) .sticky-container .label-button.primary:active,
 body:has(.deck-options-page) .sticky-container .icon-button.chevron:active,

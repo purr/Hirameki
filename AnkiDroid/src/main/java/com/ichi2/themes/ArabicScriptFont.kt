@@ -50,8 +50,6 @@ object ArabicScriptFont {
      * unicode-range is google fonts' arabic subset (bmp part, small gaps merged): the font is fetched only for a card
      * that has one of these characters, and latin never reaches it.
      * font-display block: swap would draw naskh first and switch fonts on every card; the file is local and fast.
-     * the text must never contain a dollar-brace or a backtick: the reviewer embeds the card style in a js template
-     * literal.
      */
     val CARD_FONT_FACE =
         """

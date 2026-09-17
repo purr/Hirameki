@@ -80,6 +80,18 @@ class PageWebViewClientTest {
     }
 
     @Test
+    fun pageWithNoUrlThatDiesRightAfterItsRebuildIsNotRebuiltAgain() {
+        val screen = TestScreen(Lifecycle.State.RESUMED)
+
+        // a renderer that crashes while the first load is still uncommitted leaves the webview with no url. keyed on
+        // that null the rebuild was never recorded, so such a page recreated its screen over and over
+        Page(screen, path = null).rendererGone()
+        Page(screen, path = null).rendererGone()
+
+        assertThat(rebuilds, equalTo(listOf(true, false)))
+    }
+
+    @Test
     fun pageWhoseRendererIsReclaimedAgainIsStillRebuilt() {
         val screen = TestScreen(Lifecycle.State.RESUMED)
 
@@ -123,16 +135,16 @@ class PageWebViewClientTest {
         assertThat(rebuilds, equalTo(emptyList()))
     }
 
-    /** a webview showing [path] on [screen], with a client whose host records the rebuilds */
+    /** a webview showing [path] on [screen] (null: nothing loaded yet), with a client whose host records the rebuilds */
     private inner class Page(
         screen: LifecycleOwner,
-        path: String,
+        path: String?,
     ) {
         val client = PageWebViewClient().apply { onRendererGone = { rebuilds.add(it) } }
         private val webView =
             WebView(ApplicationProvider.getApplicationContext()).apply {
                 setViewTreeLifecycleOwner(screen)
-                loadUrl("http://127.0.0.1:1$path")
+                if (path != null) loadUrl("http://127.0.0.1:1$path")
             }
 
         /** [crashed] is what the page died of: true a crash of its own, false the system taking the memory back */

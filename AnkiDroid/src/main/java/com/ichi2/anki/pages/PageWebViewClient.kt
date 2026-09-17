@@ -32,6 +32,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.findViewTreeLifecycleOwner
 import com.google.android.material.color.MaterialColors
+import com.ichi2.anki.CollectionManager.TR
 import com.ichi2.anki.OnPageFinishedCallback
 import com.ichi2.utils.AssetHelper.guessMimeType
 import com.ichi2.utils.toRGBHex
@@ -66,7 +67,7 @@ open class PageWebViewClient : WebViewClient() {
     private var cachedMaterial3Colors: Material3Colors? = null
     private var cachedMaterial3ThemeCss: String? = null
     private var cachedMaterial3ThemeAssetCss: String? = null
-    private var cachedMaterial3MotionJs: String? = null
+    private val cachedMaterial3Scripts = mutableMapOf<String, String>()
 
     private fun loadAsset(
         webView: WebView,
@@ -488,21 +489,38 @@ open class PageWebViewClient : WebViewClient() {
         applyMaterial3Theme(webView) {
             completeThemeApplication(webView, navigationId)
         }
-        applyMaterial3Motion(webView)
+        applyMaterial3Scripts(webView)
     }
 
     /**
-     * Gives the page's popups the exit motion [MATERIAL3_THEME_CSS_ASSET] cannot give them: their
-     * nodes leave the document in the frame the close starts, so the script puts each back for the
-     * length of one exit animation. It scopes itself to the deck options page, the only page whose
-     * popups the stylesheet styles, and is a no-op on the others.
+     * Runs what [MATERIAL3_THEME_CSS_ASSET] cannot do alone. Both scripts scope themselves to the
+     * deck options page, the only page the stylesheet's rules for them cover, and are no-ops on the
+     * others:
+     * - [MATERIAL3_MOTION_JS_ASSET] gives the page's popups their exit motion: their nodes leave the
+     *   document in the frame the close starts, so it puts each back for one exit animation
+     * - [MATERIAL3_STEPPERS_JS_ASSET] adds - and + buttons to the number fields, whose own step
+     *   buttons anki renders only when the user agent is not android
      */
-    private fun applyMaterial3Motion(webView: WebView) {
-        val js = cachedMaterial3MotionJs
-            ?: loadAsset(webView, MATERIAL3_MOTION_JS_ASSET).also { cachedMaterial3MotionJs = it }
-        // the asset failed to load, which loadAsset reported; the page keeps its instant closes
+    private fun applyMaterial3Scripts(webView: WebView) {
+        evaluateScriptAsset(webView, MATERIAL3_MOTION_JS_ASSET)
+        // the steppers' spoken labels in anki's own translations: the page's strings live inside its bundle, where
+        // no injected script can reach them
+        val stepperLabels =
+            JSONObject()
+                .put("decrement", TR.actionsDecrementValue())
+                .put("increment", TR.actionsIncrementValue())
+        evaluateScriptAsset(webView, MATERIAL3_STEPPERS_JS_ASSET, prelude = "window.ankiMaterial3StepperLabels = $stepperLabels;\n")
+    }
+
+    private fun evaluateScriptAsset(
+        webView: WebView,
+        assetPath: String,
+        prelude: String = "",
+    ) {
+        val js = cachedMaterial3Scripts.getOrPut(assetPath) { loadAsset(webView, assetPath) }
+        // the asset failed to load, which loadAsset reported; the page goes without what the script adds
         if (js.isEmpty()) return
-        webView.evaluateJavascript(js) {}
+        webView.evaluateJavascript(prelude + js) {}
     }
 
     /**
@@ -578,8 +596,11 @@ open class PageWebViewClient : WebViewClient() {
         // a page that crashes every fresh renderer while loading must not be rebuilt forever. only a crash counts,
         // as in Flashcard's handler: android reclaims a backgrounded renderer whenever it needs the memory, over and
         // over and through no fault of the page, so counting a reclaim as a strike force-closed a page on its second
-        // one and lost whatever was half-edited on it. tracked per page for the process, a rebuild replaces this client
-        val lastRebuild = pagePath?.let { lastRebuildByPath[it] }
+        // one and lost whatever was half-edited on it. tracked per page for the process, a rebuild replaces this
+        // client. a renderer that dies before the page commits leaves the webview with no url; those deaths share one
+        // entry (""), because a null path was never recorded and such a page was rebuilt without limit
+        val rebuildKey = pagePath.orEmpty()
+        val lastRebuild = lastRebuildByPath[rebuildKey]
         val canRebuild = !crashed || lastRebuild == null || SystemClock.elapsedRealtime() - lastRebuild >= REBUILD_LOOP_WINDOW_MS
         if (!canRebuild) Timber.e("page renderer gone again soon after a rebuild, not rebuilding %s", pagePath)
         // rebuild once the screen is started: a renderer started in the background tends to be reclaimed again
@@ -590,7 +611,7 @@ open class PageWebViewClient : WebViewClient() {
                     owner.lifecycle.removeObserver(this)
                     // the host tore the page down while it waited, so there is nothing left to rebuild
                     if (isReleased) return
-                    if (crashed && canRebuild && pagePath != null) lastRebuildByPath[pagePath] = SystemClock.elapsedRealtime()
+                    if (crashed && canRebuild) lastRebuildByPath[rebuildKey] = SystemClock.elapsedRealtime()
                     onGone(canRebuild)
                 }
             },
@@ -601,6 +622,7 @@ open class PageWebViewClient : WebViewClient() {
     companion object {
         private const val MATERIAL3_THEME_CSS_ASSET = "anki_material3_theme.css"
         private const val MATERIAL3_MOTION_JS_ASSET = "anki_material3_motion.js"
+        private const val MATERIAL3_STEPPERS_JS_ASSET = "anki_material3_steppers.js"
         private const val VISUAL_STATE_CALLBACK_TIMEOUT_MS = 300L
 
         /**
@@ -610,7 +632,7 @@ open class PageWebViewClient : WebViewClient() {
         @VisibleForTesting
         internal const val REBUILD_LOOP_WINDOW_MS = 30_000L
 
-        /** when each page path was last rebuilt after its renderer crashed, see [onRenderProcessGone] */
+        /** when each page path ("" before a page has a url) was last rebuilt after a renderer crash, see [onRenderProcessGone] */
         private val lastRebuildByPath = mutableMapOf<String, Long>()
 
         /** the rebuild times outlive any one client, so a test starts from an empty history */

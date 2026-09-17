@@ -27,6 +27,7 @@ import androidx.compose.ui.platform.ViewRootForTest
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onRoot
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.ichi2.anki.CollectionManager.TR
 import com.ichi2.anki.RobolectricTest
 import com.ichi2.themes.Theme
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -34,6 +35,7 @@ import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.containsString
 import org.hamcrest.Matchers.not
 import org.hamcrest.Matchers.sameInstance
+import org.json.JSONObject
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -72,6 +74,22 @@ class PageWebViewTest : RobolectricTest() {
         // silently show the default deck, and picking the same deck again would change nothing
         pageFinished(rebuilt)
         assertThat(shadowOf(rebuilt).lastEvaluatedJavascript, containsString(DECK_SCRIPT))
+    }
+
+    @Test
+    fun `a loaded page is given the number steppers, labelled in the ui language`() {
+        showPage()
+        val page = page()
+
+        composeTestRule.runOnIdle { shadowOf(page).webViewClient.onPageFinished(page, "${BASE_URL}deck-options/1") }
+
+        // the client evaluates its theme, then the motion script, then the steppers; robolectric keeps only the last
+        val script = shadowOf(page).lastEvaluatedJavascript
+        // the name anki_material3_steppers.js reads its labels from, which it needs before it adds any button
+        assertThat(script, containsString("window.ankiMaterial3StepperLabels = "))
+        assertThat(script, containsString(JSONObject.quote(TR.actionsDecrementValue())))
+        assertThat(script, containsString(JSONObject.quote(TR.actionsIncrementValue())))
+        assertThat("the asset follows its labels", script, containsString("const labels = window.ankiMaterial3StepperLabels;"))
     }
 
     private fun showPage() {

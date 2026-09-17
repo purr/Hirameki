@@ -20,12 +20,19 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Looper
+import android.util.TypedValue
+import androidx.activity.compose.setContent
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ichi2.anki.R
 import com.ichi2.anki.RobolectricTest
 import com.ichi2.anki.settings.Prefs
+import com.ichi2.anki.ui.compose.theme.AnkiDroidTheme
+import com.ichi2.anki.ui.compose.theme.AppTypography
+import com.ichi2.anki.ui.compose.theme.ArabicScriptTypography
 import com.ichi2.testutils.EmptyAnkiActivity
 import com.ichi2.testutils.Robolectric
 import org.hamcrest.MatcherAssert.assertThat
@@ -65,11 +72,33 @@ class ArabicScriptFontTest : RobolectricTest() {
 
     @Test
     @Config(qualifiers = "fa")
+    fun `an arabic-script ui is drawn in vazirmatn, in views and in compose`() {
+        launchActivity().use { scenario ->
+            val activity = scenario.currentActivity()
+
+            assertThat("views: the theme overlay is applied", activity.uiFontFamily(), equalTo(R.font.vazirmatn_family))
+            assertThat("compose: the typography", activity.composeTypography(), sameInstance(ArabicScriptTypography))
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "fa")
+    fun `with the switch off an arabic-script ui keeps the app font`() {
+        Prefs.putBoolean(R.string.arabic_script_font_key, false)
+
+        launchActivity().use { scenario ->
+            val activity = scenario.currentActivity()
+
+            assertThat("views", activity.uiFontFamily(), not(equalTo(R.font.vazirmatn_family)))
+            assertThat("compose", activity.composeTypography(), sameInstance(AppTypography))
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "fa")
     fun `an activity stopped behind settings recreates only when the switch changed`() {
         // the deck picker and the card browser open settings with a plain startActivity, so this is their path back
-        Robolectric.registerTestActivity<EmptyAnkiActivity>()
-        val intent = Intent.makeMainActivity(ComponentName(targetContext, EmptyAnkiActivity::class.java))
-        ActivityScenario.launch<EmptyAnkiActivity>(intent).use { scenario ->
+        launchActivity().use { scenario ->
             val created = scenario.currentActivity()
 
             scenario.stopAndStartAgain()
@@ -78,6 +107,26 @@ class ArabicScriptFontTest : RobolectricTest() {
             scenario.stopAndStartAgain { Prefs.putBoolean(R.string.arabic_script_font_key, false) }
             assertThat("changed switch recreates the activity", scenario.currentActivity(), not(sameInstance(created)))
         }
+    }
+
+    private fun launchActivity(): ActivityScenario<EmptyAnkiActivity> {
+        Robolectric.registerTestActivity<EmptyAnkiActivity>()
+        return ActivityScenario.launch(Intent.makeMainActivity(ComponentName(targetContext, EmptyAnkiActivity::class.java)))
+    }
+
+    /** the font resource the activity's theme gives views ([ArabicScriptFont]'s overlay swaps uiFontFamily) */
+    private fun Activity.uiFontFamily(): Int {
+        val value = TypedValue()
+        check(theme.resolveAttribute(R.attr.uiFontFamily, value, true)) { "the theme defines no uiFontFamily" }
+        return value.resourceId
+    }
+
+    /** the typography [AnkiDroidTheme] hands compose content in this activity */
+    private fun Activity.composeTypography(): Typography {
+        var typography: Typography? = null
+        (this as EmptyAnkiActivity).setContent { AnkiDroidTheme { typography = MaterialTheme.typography } }
+        shadowOf(Looper.getMainLooper()).idle()
+        return checkNotNull(typography) { "the content was not composed" }
     }
 
     private fun ActivityScenario<EmptyAnkiActivity>.currentActivity(): Activity {
